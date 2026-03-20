@@ -14,6 +14,7 @@ thiserror = { workspace = true }
 default = []
 nnapi = ["soprano-core/nnapi"]
 xnnpack = ["soprano-core/xnnpack"]
+coreml = ["soprano-core/coreml"]
 
 [build-dependencies]
 uniffi = { version = "0.31", features = ["build"] }

@@ -18,3 +18,4 @@ thiserror = { workspace = true }
 default = []
 nnapi = ["ort/nnapi"]
 xnnpack = ["ort/xnnpack"]
+coreml = ["ort/coreml"]

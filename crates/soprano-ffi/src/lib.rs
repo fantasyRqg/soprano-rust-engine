@@ -58,6 +58,8 @@ pub enum ExecutionProvider {
     Nnapi,
     /// XNNPACK optimized CPU kernels for ARM.
     Xnnpack,
+    /// Apple CoreML (delegates to ANE/GPU on iOS/macOS).
+    CoreMl,
 }
 
 impl From<&ExecutionProvider> for soprano_core::ExecutionProvider {
@@ -66,6 +68,7 @@ impl From<&ExecutionProvider> for soprano_core::ExecutionProvider {
             ExecutionProvider::Cpu => soprano_core::ExecutionProvider::Cpu,
             ExecutionProvider::Nnapi => soprano_core::ExecutionProvider::Nnapi,
             ExecutionProvider::Xnnpack => soprano_core::ExecutionProvider::Xnnpack,
+            ExecutionProvider::CoreMl => soprano_core::ExecutionProvider::CoreMl,
         }
     }
 }

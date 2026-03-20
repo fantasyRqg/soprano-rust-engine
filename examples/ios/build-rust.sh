@@ -16,25 +16,18 @@ for TARGET in aarch64-apple-ios aarch64-apple-ios-sim; do
     fi
 done
 
-# ORT_LIB_LOCATION must point to a directory containing libonnxruntime.a and headers.
+# ORT_LIB_LOCATION: optional override. If not set, ort-sys auto-downloads
+# prebuilt binaries from cdn.pyke.io. Set this only if you need a custom build.
 if [ -z "${ORT_LIB_LOCATION:-}" ]; then
     if [ -d "$SCRIPT_DIR/onnxruntime" ]; then
         export ORT_LIB_LOCATION="$SCRIPT_DIR/onnxruntime"
+        echo "ORT_LIB_LOCATION=$ORT_LIB_LOCATION"
     else
-        echo "Error: ORT_LIB_LOCATION not set and examples/ios/onnxruntime/ not found."
-        echo ""
-        echo "Provide a prebuilt ONNX Runtime iOS static library:"
-        echo "  1. Download or build onnxruntime for iOS (aarch64, static)"
-        echo "  2. Place at examples/ios/onnxruntime/ with structure:"
-        echo "       onnxruntime/"
-        echo "         lib/libonnxruntime.a"
-        echo "         include/onnxruntime_c_api.h"
-        echo "  3. Or set ORT_LIB_LOCATION=/path/to/onnxruntime"
-        exit 1
+        echo "ORT_LIB_LOCATION not set — ort-sys will auto-download prebuilt binaries."
     fi
+else
+    echo "ORT_LIB_LOCATION=$ORT_LIB_LOCATION"
 fi
-
-echo "ORT_LIB_LOCATION=$ORT_LIB_LOCATION"
 
 # --- Build Rust static library for iOS (device + simulator) ---
 

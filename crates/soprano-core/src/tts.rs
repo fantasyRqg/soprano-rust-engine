@@ -25,6 +25,8 @@ pub enum ExecutionProvider {
     Nnapi,
     /// XNNPACK optimized CPU kernels for ARM.
     Xnnpack,
+    /// Apple CoreML (delegates to ANE/GPU on iOS/macOS).
+    CoreMl,
 }
 
 /// Configuration for the Soprano TTS engine.

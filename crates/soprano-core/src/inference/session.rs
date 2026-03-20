@@ -36,6 +36,10 @@ pub fn load_session(path: impl AsRef<Path>, ep: &ExecutionProvider) -> Result<Se
         ExecutionProvider::Xnnpack => builder
             .with_execution_providers([ort::ep::xnnpack::XNNPACK::default().build()])
             .map_err(|e| format!("failed to register XNNPACK EP: {e}"))?,
+        #[cfg(feature = "coreml")]
+        ExecutionProvider::CoreMl => builder
+            .with_execution_providers([ort::ep::coreml::CoreML::default().build()])
+            .map_err(|e| format!("failed to register CoreML EP: {e}"))?,
         _ => builder, // CPU fallback
     };
 

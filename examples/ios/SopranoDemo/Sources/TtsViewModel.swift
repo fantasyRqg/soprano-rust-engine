@@ -1,5 +1,8 @@
 import Foundation
+import os
 import SopranoEngine
+
+private let logger = Logger(subsystem: "com.example.soprano-demo", category: "TTS")
 
 /// Thread-safe timing state shared between main actor and background threads.
 /// Write ordering is safe: feedStartNanos is set before engine.feed(),
@@ -44,7 +47,7 @@ final class TtsViewModel {
     private var speakTask: Task<Void, Never>?
     private let _timing = TimingState()
 
-    func loadModel() {
+    func loadModel(ep: String = "CPU") {
         guard !isLoading else { return }
         isLoading = true
         error = nil
@@ -75,6 +78,7 @@ final class TtsViewModel {
                         }
                     },
                     onErr: { msg in
+                        logger.error("Sink error: \(msg)")
                         Task { @MainActor in
                             self.isSpeaking = false
                             self.error = msg
@@ -93,12 +97,14 @@ final class TtsViewModel {
                     topK: 0,
                     topP: 0.95,
                     repetitionPenalty: 1.2,
-                    executionProvider: .cpu
+                    executionProvider: ep == "CoreML" ? .coreMl : .cpu
                 )
 
+                logger.info("Loading model from \(modelPath) with EP: \(ep)")
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 let newEngine = try SopranoTts(config: config, sink: newSink)
                 let loadMs = (DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000
+                logger.info("Model loaded in \(loadMs)ms")
 
                 await MainActor.run {
                     self.engine = newEngine
@@ -109,6 +115,7 @@ final class TtsViewModel {
                     self.metrics = "Load: \(loadMs)ms"
                 }
             } catch {
+                logger.error("Model load failed: \(error.localizedDescription)")
                 await MainActor.run {
                     self.isLoading = false
                     self.error = error.localizedDescription
@@ -164,8 +171,10 @@ final class TtsViewModel {
                     self.metrics = lines.joined(separator: "\n")
                     self.isSpeaking = false
                     self.status = "Done"
+                    logger.info("Synthesis done — inference: \(inferenceMs)ms, RTF: \(String(format: "%.2f", rtf))x, first byte: \(firstByte)ms")
                 }
             } catch {
+                logger.error("Synthesis failed: \(error.localizedDescription)")
                 await MainActor.run {
                     self.isSpeaking = false
                     self.error = error.localizedDescription

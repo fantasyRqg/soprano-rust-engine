@@ -20,11 +20,12 @@ struct ContentView: View {
                 Section {
                     Picker("Execution Provider", selection: $selectedEp) {
                         Text("CPU").tag("CPU")
+                        Text("CoreML").tag("CoreML")
                     }
                     .disabled(!canLoad)
 
                     Button {
-                        viewModel.loadModel()
+                        viewModel.loadModel(ep: selectedEp)
                     } label: {
                         HStack {
                             Label("Load Model", systemImage: "cpu")
