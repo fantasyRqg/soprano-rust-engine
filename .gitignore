@@ -1,0 +1,21 @@
+# Rust
+/target
+Cargo.lock
+
+# Models
+/models/*.onnx
+/models/*.data
+
+# Audio output
+*.wav
+
+# Android build artifacts
+examples/android/.gradle/
+examples/android/build/
+examples/android/app/build/
+examples/android/app/src/main/jniLibs/
+examples/android/local.properties
+
+# Superpowers plans
+docs/superpowers/
+buid

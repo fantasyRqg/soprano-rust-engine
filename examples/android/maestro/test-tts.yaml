@@ -1,0 +1,31 @@
+appId: com.example.soprano
+---
+- launchApp
+
+# Wait for UI to render
+- assertVisible: "Soprano TTS Demo"
+- assertVisible: "Load Model"
+
+# Tap Load Model
+- tapOn: "Load Model"
+
+# Wait for model to load
+- extendedWaitUntil:
+    visible: "Status: Model loaded"
+    timeout: 30000
+
+# Verify load metric is shown
+- assertVisible: "Metrics:"
+
+# Tap Speak to synthesize
+- tapOn: "Speak"
+
+# Wait for synthesis to complete
+- extendedWaitUntil:
+    visible: "Status: Done"
+    timeout: 120000
+
+- assertVisible: "Status: Done"
+
+# Take a screenshot of the final state with metrics
+- takeScreenshot: metrics_result

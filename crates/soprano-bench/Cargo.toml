@@ -1,0 +1,19 @@
+[package]
+name = "soprano-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Benchmark binary for Soprano TTS — runs via adb shell"
+
+[[bin]]
+name = "soprano-bench"
+path = "src/main.rs"
+
+[dependencies]
+soprano-core = { path = "../soprano-core" }
+clap = { version = "4", features = ["derive"] }
+
+[features]
+default = []
+nnapi = ["soprano-core/nnapi"]
+xnnpack = ["soprano-core/xnnpack"]

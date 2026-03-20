@@ -1,0 +1,20 @@
+[package]
+name = "soprano-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform TTS engine using the Soprano model with ONNX Runtime"
+
+[dependencies]
+ort = { workspace = true }
+tokenizers = { workspace = true }
+deunicode = { workspace = true }
+ndarray = { workspace = true }
+regex = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []
+nnapi = ["ort/nnapi"]
+xnnpack = ["ort/xnnpack"]

@@ -1,0 +1,17 @@
+[workspace]
+members = ["crates/soprano-core", "crates/soprano-ffi", "crates/soprano-cli", "crates/soprano-bench"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+tokenizers = "0.22"
+deunicode = "1"
+ndarray = "0.17"
+regex = "1"
+rand = "0.9"
+thiserror = "2"

@@ -1,0 +1,26 @@
+[package]
+name = "soprano-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "UniFFI bindings for the Soprano TTS engine"
+
+[dependencies]
+soprano-core = { path = "../soprano-core" }
+uniffi = { version = "0.31", features = ["cli"] }
+thiserror = { workspace = true }
+
+[features]
+default = []
+nnapi = ["soprano-core/nnapi"]
+xnnpack = ["soprano-core/xnnpack"]
+
+[build-dependencies]
+uniffi = { version = "0.31", features = ["build"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/uniffi-bindgen.rs"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]

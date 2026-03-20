@@ -1,0 +1,15 @@
+[package]
+name = "soprano-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Soprano TTS engine — convert text to audio"
+
+[[bin]]
+name = "soprano-tts"
+path = "src/main.rs"
+
+[dependencies]
+soprano-core = { path = "../soprano-core" }
+clap = { version = "4", features = ["derive"] }
+hound = "3"
