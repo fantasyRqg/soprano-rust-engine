@@ -18,6 +18,8 @@ class AudioTrackSink(
     @Volatile private var firstByteReceived = false
     @Volatile var totalBytesWritten: Long = 0
         private set
+    @Volatile var totalWriteNanos: Long = 0
+        private set
 
     init {
         val minBuffer = AudioTrack.getMinBufferSize(
@@ -53,7 +55,9 @@ class AudioTrackSink(
             firstByteReceived = true
             onFirstByte()
         }
+        val t0 = System.nanoTime()
         val written = audioTrack.write(pcmData, 0, pcmData.size)
+        totalWriteNanos += System.nanoTime() - t0
         if (written > 0) totalBytesWritten += written
         return if (written < 0) -1L else written.toLong()
     }
@@ -61,6 +65,7 @@ class AudioTrackSink(
     fun resetForNewSynthesis() {
         firstByteReceived = false
         totalBytesWritten = 0
+        totalWriteNanos = 0
     }
 
     override fun availableBytes(): ULong {

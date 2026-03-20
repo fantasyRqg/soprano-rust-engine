@@ -113,13 +113,17 @@ class TtsViewModel : ViewModel() {
                 eng.feed(text)
                 eng.drain()
                 val synthMs = (System.nanoTime() - feedStartNanos) / 1_000_000
-                val synthSec = synthMs.toDouble() / 1000.0
 
                 // Actual audio duration from bytes written: bytes / 2 (16-bit) / 32000 Hz
                 val totalBytes = sink?.totalBytesWritten ?: 0L
                 val totalSamples = totalBytes / 2
                 val audioDurationSec = totalSamples.toDouble() / 32000.0
-                val rtf = if (synthSec > 0) audioDurationSec / synthSec else 0.0
+
+                // Subtract time blocked in AudioTrack.write() to get true inference time
+                val writeBlockMs = (sink?.totalWriteNanos ?: 0L) / 1_000_000
+                val inferenceMs = synthMs - writeBlockMs
+                val inferenceSec = inferenceMs.toDouble() / 1000.0
+                val rtf = if (inferenceSec > 0) audioDurationSec / inferenceSec else 0.0
 
                 val loadPart = _uiState.value.metrics
                     .lineSequence()
@@ -131,7 +135,7 @@ class TtsViewModel : ViewModel() {
                         metrics = buildString {
                             if (loadPart.isNotEmpty()) appendLine(loadPart)
                             if (firstByteMs >= 0) appendLine("First byte: ${firstByteMs}ms")
-                            appendLine("Synth: ${synthMs}ms")
+                            appendLine("Inference: ${inferenceMs}ms (wall: ${synthMs}ms)")
                             appendLine("Audio: %.2fs (%d samples)".format(audioDurationSec, totalSamples))
                             append("RTF: %.2fx".format(rtf))
                         },
