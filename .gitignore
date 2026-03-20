@@ -20,5 +20,8 @@ examples/android/local.properties
 docs/superpowers/
 
 .idea
-buid
+build
+.build
 .claude
+
+.DS_Store

@@ -1,0 +1,27 @@
+appId: com.example.soprano-demo
+---
+# Test: Full TTS flow — load model, speak, verify status updates
+
+- assertVisible: "Soprano TTS"
+
+# Step 1: Verify initial state
+- assertVisible: "Load Model"
+
+# Step 2: Load the model
+- tapOn: "Load Model"
+
+# Wait for model to load
+- extendedWaitUntil:
+    visible: "Model loaded"
+    timeout: 60000
+
+# Step 3: Tap Speak
+- tapOn: "Speak"
+
+# Step 4: Wait for synthesis to complete
+- extendedWaitUntil:
+    visible: "Done"
+    timeout: 120000
+
+# Step 5: Verify metrics appeared
+- assertVisible: "RTF"
