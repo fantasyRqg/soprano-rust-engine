@@ -24,6 +24,20 @@ cargo ndk \
     --manifest-path "$REPO_ROOT/Cargo.toml" \
     build --release -p soprano-ffi --features soprano-ffi/nnapi,soprano-ffi/xnnpack
 
+# --- Regenerate Kotlin bindings ---
+# UniFFI bindings embed FFI checksums and must come from the same source as the
+# .so above, or the app panics at load with a checksum mismatch. Generated on
+# demand into the app sources; not checked in (see .gitignore).
+echo "Generating Kotlin bindings..."
+cargo run --release -q \
+    --manifest-path "$REPO_ROOT/Cargo.toml" \
+    -p soprano-ffi \
+    --bin uniffi-bindgen \
+    -- generate \
+    --library "$REPO_ROOT/target/aarch64-linux-android/release/libsoprano_ffi.so" \
+    --language kotlin \
+    --out-dir "$SCRIPT_DIR/app/src/main/java"
+
 # Copy libc++_shared.so from NDK (needed by ONNX Runtime)
 LIBCXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
 if [ ! -f "$LIBCXX" ]; then
@@ -32,4 +46,6 @@ if [ ! -f "$LIBCXX" ]; then
 fi
 cp "$LIBCXX" "$SCRIPT_DIR/app/src/main/jniLibs/arm64-v8a/"
 
-echo "Done! Output: app/src/main/jniLibs/arm64-v8a/libsoprano_ffi.so"
+echo "Done! Outputs:"
+echo "  Native lib: app/src/main/jniLibs/arm64-v8a/libsoprano_ffi.so"
+echo "  Bindings:   app/src/main/java/uniffi/soprano_ffi/soprano_ffi.kt"

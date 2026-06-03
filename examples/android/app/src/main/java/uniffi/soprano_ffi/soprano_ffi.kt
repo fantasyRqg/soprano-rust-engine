@@ -874,10 +874,10 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_soprano_ffi_checksum_method_ffiaudiosink_write_pcm() != 61067.toShort()) {
+    if (lib.uniffi_soprano_ffi_checksum_method_ffiaudiosink_write_pcm() != 8218.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_soprano_ffi_checksum_method_ffiaudiosink_available_bytes() != 2565.toShort()) {
+    if (lib.uniffi_soprano_ffi_checksum_method_ffiaudiosink_available_bytes() != 42083.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_soprano_ffi_checksum_method_ffiaudiosink_on_sentence_complete() != 39447.toShort()) {
@@ -895,10 +895,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_estimate() != 60762.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_feed() != 19785.toShort()) {
+    if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_feed() != 61726.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_flush() != 53621.toShort()) {
+    if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_flush() != 53496.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_soprano_ffi_checksum_method_sopranotts_set_params() != 63062.toShort()) {
@@ -1367,12 +1367,14 @@ public interface FfiAudioSink {
     
     /**
      * Write PCM data bytes to the sink. Must block if buffer is full.
-     * Returns number of bytes written.
+     * Returns number of bytes written. Returning 0 for non-empty input is
+     * treated as a write failure by the core engine.
      */
     fun `writePcm`(`pcmData`: kotlin.ByteArray): kotlin.Long
     
     /**
-     * Available space in bytes.
+     * Available space in bytes. This is advisory; blocking writes provide
+     * backpressure.
      */
     fun `availableBytes`(): kotlin.ULong
     
@@ -1497,7 +1499,8 @@ open class FfiAudioSinkImpl: Disposable, AutoCloseable, FfiAudioSink
     
     /**
      * Write PCM data bytes to the sink. Must block if buffer is full.
-     * Returns number of bytes written.
+     * Returns number of bytes written. Returning 0 for non-empty input is
+     * treated as a write failure by the core engine.
      */override fun `writePcm`(`pcmData`: kotlin.ByteArray): kotlin.Long {
             return FfiConverterLong.lift(
     callWithHandle {
@@ -1513,7 +1516,8 @@ open class FfiAudioSinkImpl: Disposable, AutoCloseable, FfiAudioSink
 
     
     /**
-     * Available space in bytes.
+     * Available space in bytes. This is advisory; blocking writes provide
+     * backpressure.
      */override fun `availableBytes`(): kotlin.ULong {
             return FfiConverterULong.lift(
     callWithHandle {
@@ -1826,12 +1830,12 @@ public interface SopranoTtsInterface {
     
     /**
      * Feed text for synthesis. Non-blocking — queues internally.
-     * Returns error if input exceeds 512 tokens after normalization.
+     * Synthesis errors are delivered asynchronously through `on_error`.
      */
     fun `feed`(`text`: kotlin.String)
     
     /**
-     * Stop current inference and discard queued sentences.
+     * Request cancellation of current inference and discard queued sentences.
      */
     fun `flush`()
     
@@ -1984,7 +1988,7 @@ open class SopranoTts: Disposable, AutoCloseable, SopranoTtsInterface
     
     /**
      * Feed text for synthesis. Non-blocking — queues internally.
-     * Returns error if input exceeds 512 tokens after normalization.
+     * Synthesis errors are delivered asynchronously through `on_error`.
      */
     @Throws(FfiException::class)override fun `feed`(`text`: kotlin.String)
         = 
@@ -2000,7 +2004,7 @@ open class SopranoTts: Disposable, AutoCloseable, SopranoTtsInterface
 
     
     /**
-     * Stop current inference and discard queued sentences.
+     * Request cancellation of current inference and discard queued sentences.
      */override fun `flush`()
         = 
     callWithHandle {
@@ -2186,7 +2190,11 @@ enum class ExecutionProvider {
     /**
      * XNNPACK optimized CPU kernels for ARM.
      */
-    XNNPACK;
+    XNNPACK,
+    /**
+     * Apple CoreML (delegates to ANE/GPU on iOS/macOS).
+     */
+    CORE_ML;
 
     
 
