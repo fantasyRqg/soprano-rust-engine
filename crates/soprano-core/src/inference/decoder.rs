@@ -33,22 +33,6 @@ fn write_f32_pcm(
     Ok(())
 }
 
-fn crossfade(prev_tail: &[f32], next_head: &[f32]) -> Vec<f32> {
-    let overlap = prev_tail.len().min(next_head.len());
-    let mut blended = Vec::with_capacity(overlap);
-
-    if overlap == 0 {
-        return blended;
-    }
-
-    for i in 0..overlap {
-        let t = i as f32 / overlap as f32;
-        blended.push(prev_tail[i] * (1.0 - t) + next_head[i] * t);
-    }
-
-    blended
-}
-
 /// Run the decoder on hidden states and return PCM f32 audio.
 fn run_decoder(session: &mut Session, hidden_states: &[Vec<f32>]) -> Result<Vec<f32>, String> {
     if hidden_states.is_empty() {
@@ -108,70 +92,35 @@ pub fn decode_streaming(
     }
 
     let total_tokens = hidden_states.len();
+    // The decoder emits (W - 1) audio frames of SAMPLES_PER_TOKEN each for a
+    // window of W tokens, so a single token yields no audio.
+    if total_tokens < 2 {
+        return Ok(0);
+    }
+    let total_frames = total_tokens - 1;
     let mut total_samples_written = 0;
     let mut offset = 0;
-    let mut pending_tail: Vec<f32> = Vec::new();
 
-    while offset < total_tokens {
-        // Determine window: receptive field + chunk
-        let rf_start = offset.saturating_sub(RECEPTIVE_FIELD);
-        let chunk_end = (offset + CHUNK_SIZE).min(total_tokens);
-        let window = &hidden_states[rf_start..chunk_end];
+    while offset < total_frames {
+        let chunk_end = (offset + CHUNK_SIZE).min(total_frames);
 
-        // Run decoder on this window
-        let audio = run_decoder(session, window)?;
+        // Decode a window with RECEPTIVE_FIELD tokens of context on BOTH sides.
+        // With context on each side, the frames we emit are bit-for-bit the same
+        // as decoding the whole sequence at once — lossless streaming, no need to
+        // crossfade seams (the previous left-only window decoded each chunk's
+        // trailing frames without right context, producing audible seams).
+        let w0 = offset.saturating_sub(RECEPTIVE_FIELD);
+        let w1 = (chunk_end + RECEPTIVE_FIELD).min(total_tokens);
+        let audio = run_decoder(session, &hidden_states[w0..w1])?;
 
-        // Extract only the chunk portion (skip receptive field audio)
-        let rf_tokens_in_window = offset - rf_start;
-        let chunk_tokens = chunk_end - offset;
-
-        let audio_start = rf_tokens_in_window * SAMPLES_PER_TOKEN;
-        let audio_end = (rf_tokens_in_window + chunk_tokens) * SAMPLES_PER_TOKEN;
-        let audio_end = audio_end.min(audio.len());
-        let audio_start = audio_start.min(audio_end);
-
-        if audio_start < audio_end {
-            let chunk_audio = &audio[audio_start..audio_end];
-            let is_last_chunk = chunk_end == total_tokens;
-            let crossfade_len = STREAM_CROSSFADE_SAMPLES.min(chunk_audio.len());
-
-            if pending_tail.is_empty() {
-                if is_last_chunk || chunk_audio.len() <= crossfade_len {
-                    write_f32_pcm(sink, chunk_audio, &mut total_samples_written)?;
-                } else {
-                    let stable_len = chunk_audio.len() - crossfade_len;
-                    write_f32_pcm(sink, &chunk_audio[..stable_len], &mut total_samples_written)?;
-                    pending_tail = chunk_audio[stable_len..].to_vec();
-                }
-            } else {
-                let overlap = pending_tail.len().min(crossfade_len);
-                let blended = crossfade(&pending_tail[..overlap], &chunk_audio[..overlap]);
-                write_f32_pcm(sink, &blended, &mut total_samples_written)?;
-
-                if is_last_chunk {
-                    write_f32_pcm(sink, &chunk_audio[overlap..], &mut total_samples_written)?;
-                    pending_tail.clear();
-                } else {
-                    let tail_len =
-                        STREAM_CROSSFADE_SAMPLES.min(chunk_audio.len().saturating_sub(overlap));
-                    let body_end = chunk_audio.len() - tail_len;
-                    if overlap < body_end {
-                        write_f32_pcm(
-                            sink,
-                            &chunk_audio[overlap..body_end],
-                            &mut total_samples_written,
-                        )?;
-                    }
-                    pending_tail = chunk_audio[body_end..].to_vec();
-                }
-            }
+        // Emit frames [offset, chunk_end); local frame index = global index - w0.
+        let start = (offset - w0) * SAMPLES_PER_TOKEN;
+        let end = ((chunk_end - w0) * SAMPLES_PER_TOKEN).min(audio.len());
+        if start < end {
+            write_f32_pcm(sink, &audio[start..end], &mut total_samples_written)?;
         }
 
         offset = chunk_end;
-    }
-
-    if !pending_tail.is_empty() {
-        write_f32_pcm(sink, &pending_tail, &mut total_samples_written)?;
     }
 
     Ok(total_samples_written)
