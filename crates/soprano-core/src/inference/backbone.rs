@@ -61,6 +61,16 @@ pub fn generate(
     input_ids: &[i64],
     params: &SamplingParams,
 ) -> Result<BackboneOutput, String> {
+    Ok(generate_cancellable(session, input_ids, params, || false)?
+        .expect("non-cancellable generation cannot be cancelled"))
+}
+
+pub(crate) fn generate_cancellable(
+    session: &mut Session,
+    input_ids: &[i64],
+    params: &SamplingParams,
+    should_cancel: impl Fn() -> bool,
+) -> Result<Option<BackboneOutput>, String> {
     let mut rng = rand::rng();
     let prompt_len = input_ids.len();
 
@@ -105,6 +115,10 @@ pub fn generate(
         .ok_or("last_hidden_state output not found")?;
 
     for _step in 0..MAX_NEW_TOKENS {
+        if should_cancel() {
+            return Ok(None);
+        }
+
         let input_len = current_ids.len();
 
         // Build input tensors
@@ -154,6 +168,10 @@ pub fn generate(
         let outputs = session
             .run(inputs)
             .map_err(|e| format!("backbone inference failed: {}", e))?;
+
+        if should_cancel() {
+            return Ok(None);
+        }
 
         // Extract logits for the last token position
         let (logits_shape, logits_data) = outputs[logits_idx]
@@ -227,11 +245,11 @@ pub fn generate(
 
         // Hallucination detection
         if hallucination_detector.check(&hidden_vec) {
-            return Ok(BackboneOutput {
+            return Ok(Some(BackboneOutput {
                 hidden_states: hidden_states_buffer,
                 generated_tokens,
                 hallucinated: true,
-            });
+            }));
         }
 
         // Next step: single token input
@@ -239,9 +257,9 @@ pub fn generate(
         seq_len += 1;
     }
 
-    Ok(BackboneOutput {
+    Ok(Some(BackboneOutput {
         hidden_states: hidden_states_buffer,
         generated_tokens,
         hallucinated: false,
-    })
+    }))
 }

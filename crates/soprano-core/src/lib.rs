@@ -1,3 +1,10 @@
+//! Core Soprano TTS engine.
+//!
+//! The primary API is `SopranoTTS`, `SopranoConfig`, `AudioSink`, and
+//! `ExecutionProvider`. The lower-level modules are exposed for tests,
+//! comparison tooling, and experiments, but the facade is the intended
+//! application boundary.
+
 pub mod audio;
 pub mod inference;
 pub mod text;

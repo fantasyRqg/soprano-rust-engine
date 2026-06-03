@@ -170,24 +170,24 @@ fn number_to_words_ordinal(n: i64) -> String {
 /// Convert a cardinal number word string to ordinal.
 fn make_ordinal(s: &str) -> String {
     // Replace the last word with its ordinal form
-    if s.ends_with("one") {
-        format!("{}first", &s[..s.len() - 3])
-    } else if s.ends_with("two") {
-        format!("{}second", &s[..s.len() - 3])
-    } else if s.ends_with("three") {
-        format!("{}third", &s[..s.len() - 5])
-    } else if s.ends_with("five") {
-        format!("{}fifth", &s[..s.len() - 4])
-    } else if s.ends_with("eight") {
-        format!("{}eighth", &s[..s.len() - 5])
-    } else if s.ends_with("nine") {
-        format!("{}ninth", &s[..s.len() - 4])
-    } else if s.ends_with("twelve") {
-        format!("{}twelfth", &s[..s.len() - 6])
-    } else if s.ends_with('y') {
-        format!("{}ieth", &s[..s.len() - 1])
+    if let Some(stem) = s.strip_suffix("one") {
+        format!("{stem}first")
+    } else if let Some(stem) = s.strip_suffix("two") {
+        format!("{stem}second")
+    } else if let Some(stem) = s.strip_suffix("three") {
+        format!("{stem}third")
+    } else if let Some(stem) = s.strip_suffix("five") {
+        format!("{stem}fifth")
+    } else if let Some(stem) = s.strip_suffix("eight") {
+        format!("{stem}eighth")
+    } else if let Some(stem) = s.strip_suffix("nine") {
+        format!("{stem}ninth")
+    } else if let Some(stem) = s.strip_suffix("twelve") {
+        format!("{stem}twelfth")
+    } else if let Some(stem) = s.strip_suffix('y') {
+        format!("{stem}ieth")
     } else {
-        format!("{}th", s)
+        format!("{s}th")
     }
 }
 

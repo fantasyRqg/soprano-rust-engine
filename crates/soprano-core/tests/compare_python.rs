@@ -29,10 +29,6 @@ fn load_npy_i64(path: &str) -> Vec<i64> {
     let bytes = std::fs::read(path).unwrap();
     // Simple npy parser for 1D int64 arrays
     // Skip header, find data
-    let header_end = bytes
-        .windows(1)
-        .position(|w| w[0] == b'\n' && bytes[..bytes.len()].contains(&0x0A))
-        .unwrap_or(0);
     // Find the \n after the header dict
     let mut pos = 0;
     // npy format: magic(6) + version(2) + header_len(2/4) + header
@@ -153,8 +149,14 @@ fn test_compare_tokens_with_python() {
     // Compare tokens
     let match_len = output.generated_tokens.len().min(ref_tokens_u32.len());
     let mut first_mismatch = None;
-    for i in 0..match_len {
-        if output.generated_tokens[i] != ref_tokens_u32[i] {
+    for (i, (rust_token, python_token)) in output
+        .generated_tokens
+        .iter()
+        .zip(&ref_tokens_u32)
+        .enumerate()
+        .take(match_len)
+    {
+        if rust_token != python_token {
             first_mismatch = Some(i);
             break;
         }

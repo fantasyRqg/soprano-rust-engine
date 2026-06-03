@@ -4,9 +4,9 @@ A cross-platform real-time text-to-speech engine written in Rust, wrapping the S
 
 ## Features
 
-- **Real-time streaming synthesis** — audio plays back as tokens are generated, no waiting for full output
+- **Windowed decoder output** — generated hidden states are decoded into PCM chunks for low-memory playback
 - **Cross-platform** — single Rust core with auto-generated bindings for Android and iOS via UniFFI
-- **Backpressure-aware audio pipeline** — worker thread streams PCM to platform audio APIs without unbounded memory growth
+- **Backpressure-aware audio pipeline** — worker thread writes PCM to platform audio APIs through blocking sinks
 - **Comprehensive text normalization** — numbers, dates, currencies, abbreviations, and special characters handled automatically
 - **Hallucination detection** — stops generation when hidden states converge, preventing runaway output
 - **Multiple execution providers** — CPU (default), NNAPI (Android), XNNPACK (optimized CPU)
@@ -154,6 +154,9 @@ let mut tts = SopranoTTS::new(config, Box::new(my_sink))?;
 tts.feed("Hello, world!")?;
 tts.drain(); // blocks until synthesis completes
 ```
+
+`feed()` queues work and returns immediately. Runtime synthesis errors are
+reported through `AudioSink::on_error`.
 
 The `AudioSink` trait lets you provide your own audio output:
 

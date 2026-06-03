@@ -12,25 +12,32 @@ fn write_f32_pcm(
     sink: &mut dyn AudioSink,
     samples: &[f32],
     total_samples_written: &mut usize,
-) -> Result<(), String> {
+    should_cancel: &impl Fn() -> bool,
+) -> Result<bool, String> {
     if samples.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
 
     let i16_samples: Vec<i16> = samples.iter().map(|&s| f32_to_i16(s)).collect();
     let mut written = 0;
     while written < i16_samples.len() {
+        if should_cancel() {
+            *total_samples_written += written;
+            return Ok(false);
+        }
+
         match sink.write(&i16_samples[written..]) {
+            Ok(0) => return Err("sink write made no progress".to_string()),
             Ok(n) => written += n,
             Err(SinkError::Closed) => {
                 *total_samples_written += written;
-                return Ok(());
+                return Ok(true);
             }
             Err(e) => return Err(format!("sink write error: {}", e)),
         }
     }
     *total_samples_written += i16_samples.len();
-    Ok(())
+    Ok(true)
 }
 
 /// Run the decoder on hidden states and return PCM f32 audio.
@@ -87,21 +94,40 @@ pub fn decode_streaming(
     hidden_states: &[Vec<f32>],
     sink: &mut dyn AudioSink,
 ) -> Result<usize, String> {
+    Ok(decode_streaming_cancellable(
+        session,
+        hidden_states,
+        sink,
+        || false,
+    )?
+    .expect("non-cancellable decoding cannot be cancelled"))
+}
+
+pub(crate) fn decode_streaming_cancellable(
+    session: &mut Session,
+    hidden_states: &[Vec<f32>],
+    sink: &mut dyn AudioSink,
+    should_cancel: impl Fn() -> bool,
+) -> Result<Option<usize>, String> {
     if hidden_states.is_empty() {
-        return Ok(0);
+        return Ok(Some(0));
     }
 
     let total_tokens = hidden_states.len();
     // The decoder emits (W - 1) audio frames of SAMPLES_PER_TOKEN each for a
     // window of W tokens, so a single token yields no audio.
     if total_tokens < 2 {
-        return Ok(0);
+        return Ok(Some(0));
     }
     let total_frames = total_tokens - 1;
     let mut total_samples_written = 0;
     let mut offset = 0;
 
     while offset < total_frames {
+        if should_cancel() {
+            return Ok(None);
+        }
+
         let chunk_end = (offset + CHUNK_SIZE).min(total_frames);
 
         // Decode a window with RECEPTIVE_FIELD tokens of context on BOTH sides.
@@ -116,12 +142,19 @@ pub fn decode_streaming(
         // Emit frames [offset, chunk_end); local frame index = global index - w0.
         let start = (offset - w0) * SAMPLES_PER_TOKEN;
         let end = ((chunk_end - w0) * SAMPLES_PER_TOKEN).min(audio.len());
-        if start < end {
-            write_f32_pcm(sink, &audio[start..end], &mut total_samples_written)?;
+        if start < end
+            && !write_f32_pcm(
+                sink,
+                &audio[start..end],
+                &mut total_samples_written,
+                &should_cancel,
+            )?
+        {
+            return Ok(None);
         }
 
         offset = chunk_end;
     }
 
-    Ok(total_samples_written)
+    Ok(Some(total_samples_written))
 }

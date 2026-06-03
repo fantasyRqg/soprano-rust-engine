@@ -12,10 +12,12 @@ pub enum SinkError {
 /// Implementations control memory allocation and backpressure.
 pub trait AudioSink: Send {
     /// Write PCM i16 samples into the sink.
-    /// MUST block if buffer is full (provides backpressure).
+    /// MUST block if buffer is full (provides backpressure) or return an error.
+    /// Returning `Ok(0)` for non-empty input is treated as a write failure.
     fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError>;
 
-    /// Available space in samples (not bytes).
+    /// Available space in samples (not bytes). This is advisory; the engine
+    /// relies on `write()` for backpressure.
     fn available(&self) -> usize;
 
     /// Called when a sentence finishes.

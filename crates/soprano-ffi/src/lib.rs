@@ -98,10 +98,12 @@ pub struct EstimateResult {
 #[uniffi::export(with_foreign)]
 pub trait FfiAudioSink: Send + Sync {
     /// Write PCM data bytes to the sink. Must block if buffer is full.
-    /// Returns number of bytes written.
+    /// Returns number of bytes written. Returning 0 for non-empty input is
+    /// treated as a write failure by the core engine.
     fn write_pcm(&self, pcm_data: Vec<u8>) -> i64;
 
-    /// Available space in bytes.
+    /// Available space in bytes. This is advisory; blocking writes provide
+    /// backpressure.
     fn available_bytes(&self) -> u64;
 
     /// Called when a sentence finishes synthesis.
@@ -190,13 +192,13 @@ impl SopranoTts {
     }
 
     /// Feed text for synthesis. Non-blocking — queues internally.
-    /// Returns error if input exceeds 512 tokens after normalization.
+    /// Synthesis errors are delivered asynchronously through `on_error`.
     pub fn feed(&self, text: String) -> Result<(), FfiError> {
         let engine = self.inner.lock().unwrap();
         engine.feed(&text).map_err(FfiError::from)
     }
 
-    /// Stop current inference and discard queued sentences.
+    /// Request cancellation of current inference and discard queued sentences.
     pub fn flush(&self) {
         let engine = self.inner.lock().unwrap();
         engine.flush();

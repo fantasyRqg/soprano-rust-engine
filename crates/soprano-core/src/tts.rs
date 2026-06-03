@@ -1,7 +1,8 @@
 //! Public API for the Soprano TTS engine.
 
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 use ort::session::Session;
@@ -101,6 +102,7 @@ enum WorkerMsg {
 pub struct SopranoTTS {
     worker_tx: mpsc::Sender<WorkerMsg>,
     worker_handle: Option<thread::JoinHandle<()>>,
+    cancel_flag: Arc<AtomicBool>,
     sampling_params: SamplingParams,
 }
 
@@ -132,6 +134,8 @@ impl SopranoTTS {
 
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
         let initial_params = sampling_params.clone();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let worker_cancel_flag = Arc::clone(&cancel_flag);
 
         let handle = thread::spawn(move || {
             worker_loop(
@@ -141,12 +145,14 @@ impl SopranoTTS {
                 &mut decoder_session,
                 sink,
                 initial_params,
+                worker_cancel_flag,
             );
         });
 
         Ok(Self {
             worker_tx: tx,
             worker_handle: Some(handle),
+            cancel_flag,
             sampling_params,
         })
     }
@@ -166,7 +172,10 @@ impl SopranoTTS {
     }
 
     /// Feed text for synthesis. Non-blocking — queues internally.
-    /// Engine normalizes, tokenizes, and errors if >512 tokens.
+    ///
+    /// This only returns queueing errors, such as a stopped worker. Synthesis
+    /// errors from normalization, tokenization, inference, or decoding are
+    /// delivered asynchronously through `AudioSink::on_error`.
     pub fn feed(&self, text: &str) -> Result<(), SopranoError> {
         self.worker_tx
             .send(WorkerMsg::Feed {
@@ -175,12 +184,17 @@ impl SopranoTTS {
             .map_err(|_| SopranoError::InferenceError("worker thread died".to_string()))
     }
 
-    /// Stop current inference and discard queued sentences.
+    /// Request cancellation of current inference and discard queued sentences.
+    ///
+    /// Cancellation is checked between ONNX calls and decoder writes. If a sink
+    /// blocks inside `write()`, cancellation takes effect after that call returns.
     pub fn flush(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
         let _ = self.worker_tx.send(WorkerMsg::Flush);
     }
 
-    /// Block until all queued sentences finish writing to sink.
+    /// Block until all queued sentences finish writing to sink, or until a
+    /// pending flush has discarded the queue.
     pub fn drain(&self) {
         let (done_tx, done_rx) = mpsc::channel();
         if self.worker_tx.send(WorkerMsg::Drain { done_tx }).is_ok() {
@@ -210,6 +224,7 @@ impl SopranoTTS {
 
 impl Drop for SopranoTTS {
     fn drop(&mut self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
         let _ = self.worker_tx.send(WorkerMsg::Shutdown);
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
@@ -225,12 +240,17 @@ fn worker_loop(
     decoder: &mut Session,
     mut sink: Box<dyn AudioSink>,
     mut params: SamplingParams,
+    cancel_flag: Arc<AtomicBool>,
 ) {
     let mut sentence_index = 0usize;
 
     loop {
         match rx.recv() {
             Ok(WorkerMsg::Feed { text }) => {
+                if cancel_flag.load(Ordering::SeqCst) {
+                    continue;
+                }
+
                 // Normalize text
                 let normalized = normalizer::normalize(&text);
                 let chunks = chunker::chunk_normalized(&normalized);
@@ -240,7 +260,13 @@ fn worker_loop(
                     continue;
                 }
 
+                let mut cancelled = false;
                 for chunk in chunks {
+                    if cancel_flag.load(Ordering::SeqCst) {
+                        cancelled = true;
+                        break;
+                    }
+
                     // Tokenize
                     let token_ids = match tokenizer.encode(&chunk) {
                         Ok(ids) => ids,
@@ -264,8 +290,17 @@ fn worker_loop(
                     let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
 
                     // Run backbone generation
-                    let backbone_output = match backbone::generate(backbone, &input_ids, &params) {
-                        Ok(out) => out,
+                    let backbone_output = match backbone::generate_cancellable(
+                        backbone,
+                        &input_ids,
+                        &params,
+                        || cancel_flag.load(Ordering::SeqCst),
+                    ) {
+                        Ok(Some(out)) => out,
+                        Ok(None) => {
+                            cancelled = true;
+                            break;
+                        }
                         Err(e) => {
                             sink.on_error(format!("backbone error: {}", e));
                             continue;
@@ -281,27 +316,48 @@ fn worker_loop(
 
                     // Run decoder with streaming
                     if !backbone_output.hidden_states.is_empty() {
-                        if let Err(e) = decoder::decode_streaming(
+                        match decoder::decode_streaming_cancellable(
                             decoder,
                             &backbone_output.hidden_states,
                             &mut *sink,
+                            || cancel_flag.load(Ordering::SeqCst),
                         ) {
-                            sink.on_error(format!("decoder error: {}", e));
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                cancelled = true;
+                                break;
+                            }
+                            Err(e) => {
+                                sink.on_error(format!("decoder error: {}", e));
+                            }
                         }
                     }
 
                     sentence_index += 1;
                     sink.on_sentence_complete(sentence_index);
                 }
+
+                if cancelled {
+                    continue;
+                }
             }
             Ok(WorkerMsg::Flush) => {
                 // Drain remaining messages from the channel
                 while let Ok(msg) = rx.try_recv() {
-                    if let WorkerMsg::Shutdown = msg {
-                        return;
+                    match msg {
+                        WorkerMsg::Shutdown => return,
+                        WorkerMsg::Drain { done_tx } => {
+                            let _ = done_tx.send(());
+                            sink.on_drain_complete();
+                        }
+                        WorkerMsg::UpdateParams(new_params) => {
+                            params = new_params;
+                        }
+                        WorkerMsg::Flush | WorkerMsg::Feed { .. } => {}
                     }
                 }
                 sentence_index = 0;
+                cancel_flag.store(false, Ordering::SeqCst);
             }
             Ok(WorkerMsg::Drain { done_tx }) => {
                 let _ = done_tx.send(());

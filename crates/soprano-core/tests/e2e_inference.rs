@@ -1,7 +1,8 @@
 //! End-to-end integration test for the Soprano TTS engine.
 
 use soprano_core::{AudioSink, SinkError, SopranoConfig, SopranoTTS};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// Simple test sink that collects all audio samples.
 struct CollectorSink {
@@ -141,7 +142,7 @@ fn test_e2e_basic_synthesis() {
     assert!(errors.is_empty(), "unexpected errors: {:?}", *errors);
 
     // Audio should be within i16 range (sanity check)
-    let max_abs = samples.iter().map(|s| s.abs() as u16).max().unwrap_or(0);
+    let max_abs = samples.iter().map(|&s| s.unsigned_abs()).max().unwrap_or(0);
     eprintln!("Max absolute sample value: {}", max_abs);
     assert!(max_abs > 0, "all samples are zero — likely a bug");
 }
@@ -179,6 +180,36 @@ fn test_e2e_input_too_long() {
         errors[0].contains("too long"),
         "expected 'too long' error, got: {}",
         errors[0]
+    );
+}
+
+#[test]
+fn test_e2e_flush_then_drain_completes() {
+    if !models_available() {
+        return;
+    }
+
+    let sink = CollectorSink::new(1_000_000);
+    let config = SopranoConfig {
+        model_path: models_dir().to_string_lossy().to_string(),
+        ..Default::default()
+    };
+
+    let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
+    engine
+        .feed(&"hello ".repeat(700))
+        .expect("feed should succeed");
+    engine.flush();
+
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        engine.drain();
+        let _ = done_tx.send(());
+    });
+
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "flush followed by drain did not complete"
     );
 }
 
