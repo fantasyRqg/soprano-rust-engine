@@ -7,9 +7,26 @@ use std::sync::LazyLock;
 // ─── Number-to-words engine ────────────────────────────────────────────────
 
 static ONES: &[&str] = &[
-    "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-    "seventeen", "eighteen", "nineteen",
+    "",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
 ];
 
 static TENS: &[&str] = &[
@@ -17,14 +34,39 @@ static TENS: &[&str] = &[
 ];
 
 static ORDINAL_ONES: &[&str] = &[
-    "", "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
-    "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth",
-    "seventeenth", "eighteenth", "nineteenth",
+    "",
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+    "thirteenth",
+    "fourteenth",
+    "fifteenth",
+    "sixteenth",
+    "seventeenth",
+    "eighteenth",
+    "nineteenth",
 ];
 
 static ORDINAL_TENS: &[&str] = &[
-    "", "", "twentieth", "thirtieth", "fortieth", "fiftieth", "sixtieth", "seventieth",
-    "eightieth", "ninetieth",
+    "",
+    "",
+    "twentieth",
+    "thirtieth",
+    "fortieth",
+    "fiftieth",
+    "sixtieth",
+    "seventieth",
+    "eightieth",
+    "ninetieth",
 ];
 
 /// Convert an integer to English words (no "and").
@@ -32,7 +74,11 @@ fn number_to_words(n: i64) -> String {
     if n == 0 {
         return "zero".to_string();
     }
-    let (neg, n) = if n < 0 { ("minus ", -n as u64) } else { ("", n as u64) };
+    let (neg, n) = if n < 0 {
+        ("minus ", -n as u64)
+    } else {
+        ("", n as u64)
+    };
     format!("{}{}", neg, unsigned_to_words(n))
 }
 
@@ -110,7 +156,11 @@ fn number_to_words_ordinal(n: i64) -> String {
         if rem == 0 {
             return ORDINAL_TENS[(abs_n / 10) as usize].to_string();
         }
-        return format!("{}-{}", TENS[(abs_n / 10) as usize], ORDINAL_ONES[rem as usize]);
+        return format!(
+            "{}-{}",
+            TENS[(abs_n / 10) as usize],
+            ORDINAL_ONES[rem as usize]
+        );
     }
     // For larger numbers, convert the cardinal form and add ordinal suffix
     let words = number_to_words(n);
@@ -147,18 +197,18 @@ fn expand_number(n: i64) -> String {
         if n == 2000 {
             return "two thousand".to_string();
         } else if n > 2000 && n < 2010 {
-            return format!("two thousand {}", number_to_words((n % 100) as i64));
+            return format!("two thousand {}", number_to_words(n % 100));
         } else if n % 100 == 0 {
-            return format!("{} hundred", number_to_words((n / 100) as i64));
+            return format!("{} hundred", number_to_words(n / 100));
         } else {
             // group=2 style: "twenty twenty-three" for 2023
             let hi = n / 100;
             let lo = n % 100;
-            let hi_words = number_to_words(hi as i64);
+            let hi_words = number_to_words(hi);
             let lo_words = if lo < 10 {
-                format!("oh {}", number_to_words(lo as i64))
+                format!("oh {}", number_to_words(lo))
             } else {
-                number_to_words(lo as i64)
+                number_to_words(lo)
             };
             return format!("{} {}", hi_words, lo_words);
         }
@@ -173,7 +223,12 @@ macro_rules! lazy_regex {
         LazyLock::new(|| Regex::new($pat).unwrap())
     };
     ($pat:expr, $flags:expr) => {
-        LazyLock::new(|| regex::RegexBuilder::new($pat).case_insensitive(true).build().unwrap())
+        LazyLock::new(|| {
+            regex::RegexBuilder::new($pat)
+                .case_insensitive(true)
+                .build()
+                .unwrap()
+        })
     };
 }
 
@@ -181,7 +236,8 @@ static NUM_PREFIX_RE: LazyLock<Regex> = lazy_regex!(r"#\d");
 static NUM_SUFFIX_RE: LazyLock<Regex> = lazy_regex!(r"\b\d+(K|M|B|T)\b", "i");
 static NUM_LETTER_SPLIT_RE: LazyLock<Regex> = lazy_regex!(r"(\d[a-zA-Z]|[a-zA-Z]\d)");
 static COMMA_NUMBER_RE: LazyLock<Regex> = lazy_regex!(r"(\d[\d,]+\d)");
-static DATE_RE: LazyLock<Regex> = lazy_regex!(r"(^|[^/])(\d\d?[/\-]\d\d?[/\-]\d\d(?:\d\d)?)($|[^/])");
+static DATE_RE: LazyLock<Regex> =
+    lazy_regex!(r"(^|[^/])(\d\d?[/\-]\d\d?[/\-]\d\d(?:\d\d)?)($|[^/])");
 static PHONE_NUMBER_RE: LazyLock<Regex> = lazy_regex!(r"(\(?\d{3}\)?[-.\s]\d{3}[-.\s]?\d{4})");
 static TIME_RE: LazyLock<Regex> = lazy_regex!(r"(\d\d?:\d\d(?::\d\d)?)");
 static POUNDS_RE: LazyLock<Regex> = lazy_regex!(r"£([\d,]*\d+)");
@@ -222,29 +278,62 @@ struct Abbreviation {
 
 static ABBREVIATIONS: LazyLock<Vec<Abbreviation>> = LazyLock::new(|| {
     let with_dot: Vec<(&str, &str)> = vec![
-        ("mrs", "misess"), ("ms", "miss"), ("mr", "mister"), ("dr", "doctor"),
-        ("st", "saint"), ("co", "company"), ("jr", "junior"), ("maj", "major"),
-        ("gen", "general"), ("drs", "doctors"), ("rev", "reverend"),
-        ("lt", "lieutenant"), ("hon", "honorable"), ("sgt", "sergeant"),
-        ("capt", "captain"), ("esq", "esquire"), ("ltd", "limited"),
-        ("col", "colonel"), ("ft", "fort"),
+        ("mrs", "misess"),
+        ("ms", "miss"),
+        ("mr", "mister"),
+        ("dr", "doctor"),
+        ("st", "saint"),
+        ("co", "company"),
+        ("jr", "junior"),
+        ("maj", "major"),
+        ("gen", "general"),
+        ("drs", "doctors"),
+        ("rev", "reverend"),
+        ("lt", "lieutenant"),
+        ("hon", "honorable"),
+        ("sgt", "sergeant"),
+        ("capt", "captain"),
+        ("esq", "esquire"),
+        ("ltd", "limited"),
+        ("col", "colonel"),
+        ("ft", "fort"),
     ];
     let cased: Vec<(&str, &str)> = vec![
-        ("Hz", "hertz"), ("kHz", "kilohertz"),
-        ("KBs", "kilobytes"), ("KB", "kilobyte"),
-        ("MBs", "megabytes"), ("MB", "megabyte"),
-        ("GBs", "gigabytes"), ("GB", "gigabyte"),
-        ("TBs", "terabytes"), ("TB", "terabyte"),
-        ("APIs", "a p i's"), ("API", "a p i"),
-        ("CLIs", "c l i's"), ("CLI", "c l i"),
-        ("CPUs", "c p u's"), ("CPU", "c p u"),
-        ("GPUs", "g p u's"), ("GPU", "g p u"),
-        ("Ave", "avenue"), ("etc", "et cetera"),
-        ("Mon", "monday"), ("Tues", "tuesday"), ("Wed", "wednesday"),
-        ("Thurs", "thursday"), ("Fri", "friday"), ("Sat", "saturday"),
-        ("Jan", "january"), ("Feb", "february"), ("Mar", "march"),
-        ("Apr", "april"), ("Aug", "august"), ("Sept", "september"),
-        ("Oct", "october"), ("Nov", "november"), ("Dec", "december"),
+        ("Hz", "hertz"),
+        ("kHz", "kilohertz"),
+        ("KBs", "kilobytes"),
+        ("KB", "kilobyte"),
+        ("MBs", "megabytes"),
+        ("MB", "megabyte"),
+        ("GBs", "gigabytes"),
+        ("GB", "gigabyte"),
+        ("TBs", "terabytes"),
+        ("TB", "terabyte"),
+        ("APIs", "a p i's"),
+        ("API", "a p i"),
+        ("CLIs", "c l i's"),
+        ("CLI", "c l i"),
+        ("CPUs", "c p u's"),
+        ("CPU", "c p u"),
+        ("GPUs", "g p u's"),
+        ("GPU", "g p u"),
+        ("Ave", "avenue"),
+        ("etc", "et cetera"),
+        ("Mon", "monday"),
+        ("Tues", "tuesday"),
+        ("Wed", "wednesday"),
+        ("Thurs", "thursday"),
+        ("Fri", "friday"),
+        ("Sat", "saturday"),
+        ("Jan", "january"),
+        ("Feb", "february"),
+        ("Mar", "march"),
+        ("Apr", "april"),
+        ("Aug", "august"),
+        ("Sept", "september"),
+        ("Oct", "october"),
+        ("Nov", "november"),
+        ("Dec", "december"),
         ("and/or", "and or"),
     ];
 
@@ -254,12 +343,18 @@ static ABBREVIATIONS: LazyLock<Vec<Abbreviation>> = LazyLock::new(|| {
             .case_insensitive(true)
             .build()
             .unwrap();
-        abbrs.push(Abbreviation { pattern: re, replacement: rep });
+        abbrs.push(Abbreviation {
+            pattern: re,
+            replacement: rep,
+        });
     }
     for (pat, rep) in cased {
         // Case-sensitive, word boundary
         let re = Regex::new(&format!(r"\b{}\b", regex::escape(pat))).unwrap();
-        abbrs.push(Abbreviation { pattern: re, replacement: rep });
+        abbrs.push(Abbreviation {
+            pattern: re,
+            replacement: rep,
+        });
     }
     abbrs
 });
@@ -280,23 +375,74 @@ static PREUNICODE_SPECIAL: LazyLock<Vec<CharReplacement>> = LazyLock::new(|| {
 
 static SPECIAL_CHARACTERS: LazyLock<Vec<CharReplacement>> = LazyLock::new(|| {
     vec![
-        CharReplacement { pattern: Regex::new("@").unwrap(), replacement: " at " },
-        CharReplacement { pattern: Regex::new("&").unwrap(), replacement: " and " },
-        CharReplacement { pattern: Regex::new("%").unwrap(), replacement: " percent " },
-        CharReplacement { pattern: Regex::new(":").unwrap(), replacement: "." },
-        CharReplacement { pattern: Regex::new(";").unwrap(), replacement: "," },
-        CharReplacement { pattern: Regex::new(r"\+").unwrap(), replacement: " plus " },
-        CharReplacement { pattern: Regex::new(r"\\").unwrap(), replacement: " backslash " },
-        CharReplacement { pattern: Regex::new("~").unwrap(), replacement: " about " },
-        CharReplacement { pattern: Regex::new(r"(^| )<3").unwrap(), replacement: " heart " },
-        CharReplacement { pattern: Regex::new("<=").unwrap(), replacement: " less than or equal to " },
-        CharReplacement { pattern: Regex::new(">=").unwrap(), replacement: " greater than or equal to " },
-        CharReplacement { pattern: Regex::new("<").unwrap(), replacement: " less than " },
-        CharReplacement { pattern: Regex::new(">").unwrap(), replacement: " greater than " },
-        CharReplacement { pattern: Regex::new("=").unwrap(), replacement: " equals " },
-        CharReplacement { pattern: Regex::new("/").unwrap(), replacement: " slash " },
-        CharReplacement { pattern: Regex::new("_").unwrap(), replacement: " " },
-        CharReplacement { pattern: Regex::new(r"\*").unwrap(), replacement: " " },
+        CharReplacement {
+            pattern: Regex::new("@").unwrap(),
+            replacement: " at ",
+        },
+        CharReplacement {
+            pattern: Regex::new("&").unwrap(),
+            replacement: " and ",
+        },
+        CharReplacement {
+            pattern: Regex::new("%").unwrap(),
+            replacement: " percent ",
+        },
+        CharReplacement {
+            pattern: Regex::new(":").unwrap(),
+            replacement: ".",
+        },
+        CharReplacement {
+            pattern: Regex::new(";").unwrap(),
+            replacement: ",",
+        },
+        CharReplacement {
+            pattern: Regex::new(r"\+").unwrap(),
+            replacement: " plus ",
+        },
+        CharReplacement {
+            pattern: Regex::new(r"\\").unwrap(),
+            replacement: " backslash ",
+        },
+        CharReplacement {
+            pattern: Regex::new("~").unwrap(),
+            replacement: " about ",
+        },
+        CharReplacement {
+            pattern: Regex::new(r"(^| )<3").unwrap(),
+            replacement: " heart ",
+        },
+        CharReplacement {
+            pattern: Regex::new("<=").unwrap(),
+            replacement: " less than or equal to ",
+        },
+        CharReplacement {
+            pattern: Regex::new(">=").unwrap(),
+            replacement: " greater than or equal to ",
+        },
+        CharReplacement {
+            pattern: Regex::new("<").unwrap(),
+            replacement: " less than ",
+        },
+        CharReplacement {
+            pattern: Regex::new(">").unwrap(),
+            replacement: " greater than ",
+        },
+        CharReplacement {
+            pattern: Regex::new("=").unwrap(),
+            replacement: " equals ",
+        },
+        CharReplacement {
+            pattern: Regex::new("/").unwrap(),
+            replacement: " slash ",
+        },
+        CharReplacement {
+            pattern: Regex::new("_").unwrap(),
+            replacement: " ",
+        },
+        CharReplacement {
+            pattern: Regex::new(r"\*").unwrap(),
+            replacement: " ",
+        },
     ]
 });
 
@@ -337,205 +483,277 @@ fn normalize_numbers(text: &str) -> String {
     let mut text = text.to_string();
 
     // #N → "number N"
-    text = NUM_PREFIX_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        format!("number {}", &m[1..])
-    }).to_string();
+    text = NUM_PREFIX_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            format!("number {}", &m[1..])
+        })
+        .to_string();
 
     // NK/M/B/T → "N thousand/million/billion/trillion"
-    text = NUM_SUFFIX_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        let suffix = m.chars().last().unwrap().to_ascii_uppercase();
-        let num_part = &m[..m.len() - 1];
-        match suffix {
-            'K' => format!("{} thousand", num_part),
-            'M' => format!("{} million", num_part),
-            'B' => format!("{} billion", num_part),
-            'T' => format!("{} trillion", num_part),
-            _ => m.to_string(),
-        }
-    }).to_string();
+    text = NUM_SUFFIX_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            let suffix = m.chars().last().unwrap().to_ascii_uppercase();
+            let num_part = &m[..m.len() - 1];
+            match suffix {
+                'K' => format!("{} thousand", num_part),
+                'M' => format!("{} million", num_part),
+                'B' => format!("{} billion", num_part),
+                'T' => format!("{} trillion", num_part),
+                _ => m.to_string(),
+            }
+        })
+        .to_string();
 
     // Remove commas from numbers
-    text = COMMA_NUMBER_RE.replace_all(&text, |caps: &regex::Captures| {
-        caps.get(1).unwrap().as_str().replace(',', "")
-    }).to_string();
+    text = COMMA_NUMBER_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            caps.get(1).unwrap().as_str().replace(',', "")
+        })
+        .to_string();
 
     // Dates
-    text = DATE_RE.replace_all(&text, |caps: &regex::Captures| {
-        let prefix = caps.get(1).unwrap().as_str();
-        let date = caps.get(2).unwrap().as_str();
-        let suffix = caps.get(3).unwrap().as_str();
-        let parts: Vec<&str> = date.split(|c| c == '/' || c == '-').collect();
-        format!("{}{}{}", prefix, parts.join(" dash "), suffix)
-    }).to_string();
+    text = DATE_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let prefix = caps.get(1).unwrap().as_str();
+            let date = caps.get(2).unwrap().as_str();
+            let suffix = caps.get(3).unwrap().as_str();
+            let parts: Vec<&str> = date.split(['/', '-']).collect();
+            format!("{}{}{}", prefix, parts.join(" dash "), suffix)
+        })
+        .to_string();
 
     // Phone numbers
-    text = PHONE_NUMBER_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(1).unwrap().as_str();
-        let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
-        if digits.len() == 10 {
-            let area: String = digits[..3].chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-            let mid: String = digits[3..6].chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-            let last: String = digits[6..].chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
-            format!("{}, {}, {}", area, mid, last)
-        } else {
-            m.to_string()
-        }
-    }).to_string();
+    text = PHONE_NUMBER_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(1).unwrap().as_str();
+            let digits: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.len() == 10 {
+                let area: String = digits[..3]
+                    .chars()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mid: String = digits[3..6]
+                    .chars()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let last: String = digits[6..]
+                    .chars()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{}, {}, {}", area, mid, last)
+            } else {
+                m.to_string()
+            }
+        })
+        .to_string();
 
     // Times
-    text = TIME_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(1).unwrap().as_str();
-        let parts: Vec<&str> = m.split(':').collect();
-        if parts.len() == 2 {
-            let hours = parts[0];
-            let minutes = parts[1];
-            if minutes == "00" {
-                let h: i64 = hours.parse().unwrap_or(0);
-                if h == 0 {
-                    return "0".to_string();
-                } else if h <= 12 {
-                    return format!("{} o'clock", hours);
+    text = TIME_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(1).unwrap().as_str();
+            let parts: Vec<&str> = m.split(':').collect();
+            if parts.len() == 2 {
+                let hours = parts[0];
+                let minutes = parts[1];
+                if minutes == "00" {
+                    let h: i64 = hours.parse().unwrap_or(0);
+                    if h == 0 {
+                        return "0".to_string();
+                    } else if h <= 12 {
+                        return format!("{} o'clock", hours);
+                    }
+                    return format!("{} minutes", hours);
+                } else if let Some(rest) = minutes.strip_prefix('0') {
+                    return format!("{} oh {}", hours, rest);
                 }
-                return format!("{} minutes", hours);
-            } else if minutes.starts_with('0') {
-                return format!("{} oh {}", hours, &minutes[1..]);
-            }
-            format!("{} {}", hours, minutes)
-        } else if parts.len() == 3 {
-            let hours = parts[0];
-            let minutes = parts[1];
-            let seconds = parts[2];
-            let h: i64 = hours.parse().unwrap_or(0);
-            if h != 0 {
-                let min_part = if minutes == "00" {
-                    "oh oh".to_string()
-                } else if minutes.starts_with('0') {
-                    format!("oh {}", &minutes[1..])
-                } else {
-                    minutes.to_string()
-                };
-                let sec_part = if seconds == "00" {
-                    String::new()
-                } else if seconds.starts_with('0') {
-                    format!("oh {}", &seconds[1..])
+                format!("{} {}", hours, minutes)
+            } else if parts.len() == 3 {
+                let hours = parts[0];
+                let minutes = parts[1];
+                let seconds = parts[2];
+                let h: i64 = hours.parse().unwrap_or(0);
+                if h != 0 {
+                    let min_part = if minutes == "00" {
+                        "oh oh".to_string()
+                    } else if let Some(rest) = minutes.strip_prefix('0') {
+                        format!("oh {}", rest)
+                    } else {
+                        minutes.to_string()
+                    };
+                    let sec_part = if seconds == "00" {
+                        String::new()
+                    } else if let Some(rest) = seconds.strip_prefix('0') {
+                        format!("oh {}", rest)
+                    } else {
+                        seconds.to_string()
+                    };
+                    format!("{} {} {}", hours, min_part, sec_part)
+                        .trim()
+                        .to_string()
+                } else if minutes != "00" {
+                    let sec_part = if seconds == "00" {
+                        "oh oh".to_string()
+                    } else if let Some(rest) = seconds.strip_prefix('0') {
+                        format!("oh {}", rest)
+                    } else {
+                        seconds.to_string()
+                    };
+                    format!("{} {}", minutes, sec_part)
                 } else {
                     seconds.to_string()
-                };
-                format!("{} {} {}", hours, min_part, sec_part).trim().to_string()
-            } else if minutes != "00" {
-                let sec_part = if seconds == "00" {
-                    "oh oh".to_string()
-                } else if seconds.starts_with('0') {
-                    format!("oh {}", &seconds[1..])
-                } else {
-                    seconds.to_string()
-                };
-                format!("{} {}", minutes, sec_part)
+                }
             } else {
-                seconds.to_string()
+                m.to_string()
             }
-        } else {
-            m.to_string()
-        }
-    }).to_string();
+        })
+        .to_string();
 
     // Pounds
     text = POUNDS_RE.replace_all(&text, "$1 pounds").to_string();
 
     // Dollars
-    text = DOLLARS_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(1).unwrap().as_str();
-        let parts: Vec<&str> = m.split('.').collect();
-        if parts.len() > 2 {
-            return format!("{} dollars", m);
-        }
-        let dollars: i64 = parts[0].replace(',', "").parse().unwrap_or(0);
-        let cents: i64 = if parts.len() > 1 && !parts[1].is_empty() {
-            parts[1].parse().unwrap_or(0)
-        } else {
-            0
-        };
-        if dollars > 0 && cents > 0 {
-            let d_unit = if dollars == 1 { "dollar" } else { "dollars" };
-            let c_unit = if cents == 1 { "cent" } else { "cents" };
-            format!("{} {}, {} {}", dollars, d_unit, cents, c_unit)
-        } else if dollars > 0 {
-            let d_unit = if dollars == 1 { "dollar" } else { "dollars" };
-            format!("{} {}", dollars, d_unit)
-        } else if cents > 0 {
-            let c_unit = if cents == 1 { "cent" } else { "cents" };
-            format!("{} {}", cents, c_unit)
-        } else {
-            "zero dollars".to_string()
-        }
-    }).to_string();
+    text = DOLLARS_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(1).unwrap().as_str();
+            let parts: Vec<&str> = m.split('.').collect();
+            if parts.len() > 2 {
+                return format!("{} dollars", m);
+            }
+            let dollars: i64 = parts[0].replace(',', "").parse().unwrap_or(0);
+            let cents: i64 = if parts.len() > 1 && !parts[1].is_empty() {
+                parts[1].parse().unwrap_or(0)
+            } else {
+                0
+            };
+            if dollars > 0 && cents > 0 {
+                let d_unit = if dollars == 1 { "dollar" } else { "dollars" };
+                let c_unit = if cents == 1 { "cent" } else { "cents" };
+                format!("{} {}, {} {}", dollars, d_unit, cents, c_unit)
+            } else if dollars > 0 {
+                let d_unit = if dollars == 1 { "dollar" } else { "dollars" };
+                format!("{} {}", dollars, d_unit)
+            } else if cents > 0 {
+                let c_unit = if cents == 1 { "cent" } else { "cents" };
+                format!("{} {}", cents, c_unit)
+            } else {
+                "zero dollars".to_string()
+            }
+        })
+        .to_string();
 
     // Decimal points
-    text = DECIMAL_NUMBER_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(1).unwrap().as_str();
-        let parts: Vec<&str> = m.split('.').collect();
-        let mut result = parts[0].to_string();
-        for part in &parts[1..] {
-            result.push_str(" point ");
-            result.push_str(&part.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
-        }
-        result
-    }).to_string();
+    text = DECIMAL_NUMBER_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(1).unwrap().as_str();
+            let parts: Vec<&str> = m.split('.').collect();
+            let mut result = parts[0].to_string();
+            for part in &parts[1..] {
+                result.push_str(" point ");
+                result.push_str(
+                    &part
+                        .chars()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+            }
+            result
+        })
+        .to_string();
 
     // Math operations
-    text = MULTIPLY_RE.replace_all(&text, |caps: &regex::Captures| {
-        caps.get(1).unwrap().as_str().split('*').collect::<Vec<_>>().join(" times ")
-    }).to_string();
+    text = MULTIPLY_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            caps.get(1)
+                .unwrap()
+                .as_str()
+                .split('*')
+                .collect::<Vec<_>>()
+                .join(" times ")
+        })
+        .to_string();
 
-    text = DIVIDE_RE.replace_all(&text, |caps: &regex::Captures| {
-        caps.get(1).unwrap().as_str().split('/').collect::<Vec<_>>().join(" over ")
-    }).to_string();
+    text = DIVIDE_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            caps.get(1)
+                .unwrap()
+                .as_str()
+                .split('/')
+                .collect::<Vec<_>>()
+                .join(" over ")
+        })
+        .to_string();
 
-    text = ADD_RE.replace_all(&text, |caps: &regex::Captures| {
-        caps.get(1).unwrap().as_str().split('+').collect::<Vec<_>>().join(" plus ")
-    }).to_string();
+    text = ADD_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            caps.get(1)
+                .unwrap()
+                .as_str()
+                .split('+')
+                .collect::<Vec<_>>()
+                .join(" plus ")
+        })
+        .to_string();
 
-    text = SUBTRACT_RE.replace_all(&text, |caps: &regex::Captures| {
-        caps.get(1).unwrap().as_str().split('-').collect::<Vec<_>>().join(" minus ")
-    }).to_string();
+    text = SUBTRACT_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            caps.get(1)
+                .unwrap()
+                .as_str()
+                .split('-')
+                .collect::<Vec<_>>()
+                .join(" minus ")
+        })
+        .to_string();
 
     // Fractions
-    text = FRACTION_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(1).unwrap().as_str();
-        let parts: Vec<&str> = m.split('/').collect();
-        if parts.len() == 2 {
-            parts.join(" over ")
-        } else {
-            parts.join(" slash ")
-        }
-    }).to_string();
+    text = FRACTION_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(1).unwrap().as_str();
+            let parts: Vec<&str> = m.split('/').collect();
+            if parts.len() == 2 {
+                parts.join(" over ")
+            } else {
+                parts.join(" slash ")
+            }
+        })
+        .to_string();
 
     // Ordinals
-    text = ORDINAL_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        // Strip suffix (st/nd/rd/th) to get the number
-        let num_str: String = m.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let n: i64 = num_str.parse().unwrap_or(0);
-        number_to_words_ordinal(n)
-    }).to_string();
+    text = ORDINAL_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            // Strip suffix (st/nd/rd/th) to get the number
+            let num_str: String = m.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let n: i64 = num_str.parse().unwrap_or(0);
+            number_to_words_ordinal(n)
+        })
+        .to_string();
 
     // Split alphanumeric (run twice like Python)
     for _ in 0..2 {
-        text = NUM_LETTER_SPLIT_RE.replace_all(&text, |caps: &regex::Captures| {
-            let m = caps.get(1).unwrap().as_str();
-            let chars: Vec<char> = m.chars().collect();
-            format!("{} {}", chars[0], chars[1])
-        }).to_string();
+        text = NUM_LETTER_SPLIT_RE
+            .replace_all(&text, |caps: &regex::Captures| {
+                let m = caps.get(1).unwrap().as_str();
+                let chars: Vec<char> = m.chars().collect();
+                format!("{} {}", chars[0], chars[1])
+            })
+            .to_string();
     }
 
     // General numbers
-    text = NUMBER_RE.replace_all(&text, |caps: &regex::Captures| {
-        let num_str = caps.get(0).unwrap().as_str();
-        let n: i64 = num_str.parse().unwrap_or(0);
-        expand_number(n)
-    }).to_string();
+    text = NUMBER_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let num_str = caps.get(0).unwrap().as_str();
+            let n: i64 = num_str.parse().unwrap_or(0);
+            expand_number(n)
+        })
+        .to_string();
 
     text
 }
@@ -544,33 +762,41 @@ fn normalize_special(text: &str) -> String {
     let mut text = text.to_string();
 
     // URLs
-    text = LINK_HEADER_RE.replace_all(&text, "h t t p s colon slash slash ").to_string();
+    text = LINK_HEADER_RE
+        .replace_all(&text, "h t t p s colon slash slash ")
+        .to_string();
 
     // Dashes: ". - ." → "X, Y"
-    text = DASH_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        let chars: Vec<char> = m.chars().collect();
-        format!("{}, {}", chars[0], chars[4])
-    }).to_string();
+    text = DASH_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            let chars: Vec<char> = m.chars().collect();
+            format!("{}, {}", chars[0], chars[4])
+        })
+        .to_string();
 
     // Initials: "A.B" → "A dot B"
-    text = DOT_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        let chars: Vec<char> = m.chars().collect();
-        format!("{} dot {}", chars[0], chars[2])
-    }).to_string();
+    text = DOT_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            let chars: Vec<char> = m.chars().collect();
+            format!("{} dot {}", chars[0], chars[2])
+        })
+        .to_string();
 
     // Parentheses
-    text = PARENTHESES_RE.replace_all(&text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        let re_open = Regex::new(r"[\(\[\{]").unwrap();
-        let re_close_mid = Regex::new(r"[\)\]\}][^$.!?,]").unwrap();
-        let re_close = Regex::new(r"[\)\]\}]").unwrap();
-        let mut result = re_open.replace_all(m, ", ").to_string();
-        result = re_close_mid.replace_all(&result, ", ").to_string();
-        result = re_close.replace_all(&result, "").to_string();
-        result
-    }).to_string();
+    text = PARENTHESES_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            let re_open = Regex::new(r"[\(\[\{]").unwrap();
+            let re_close_mid = Regex::new(r"[\)\]\}][^$.!?,]").unwrap();
+            let re_close = Regex::new(r"[\)\]\}]").unwrap();
+            let mut result = re_open.replace_all(m, ", ").to_string();
+            result = re_close_mid.replace_all(&result, ", ").to_string();
+            result = re_close.replace_all(&result, "").to_string();
+            result
+        })
+        .to_string();
 
     text
 }
@@ -578,7 +804,10 @@ fn normalize_special(text: &str) -> String {
 fn expand_abbreviations(text: &str) -> String {
     let mut result = text.to_string();
     for abbr in ABBREVIATIONS.iter() {
-        result = abbr.pattern.replace_all(&result, abbr.replacement).to_string();
+        result = abbr
+            .pattern
+            .replace_all(&result, abbr.replacement)
+            .to_string();
     }
     result
 }
@@ -586,23 +815,28 @@ fn expand_abbreviations(text: &str) -> String {
 static CAMELCASE_SPLIT_RE: LazyLock<Regex> = lazy_regex!("[A-Z][a-z]*");
 
 fn normalize_mixedcase(text: &str) -> String {
-    CAMELCASE_RE.replace_all(text, |caps: &regex::Captures| {
-        let m = caps.get(0).unwrap().as_str();
-        let matches: Vec<&str> = CAMELCASE_SPLIT_RE.find_iter(m).map(|mat| mat.as_str()).collect();
+    CAMELCASE_RE
+        .replace_all(text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap().as_str();
+            let matches: Vec<&str> = CAMELCASE_SPLIT_RE
+                .find_iter(m)
+                .map(|mat| mat.as_str())
+                .collect();
 
-        if matches.len() <= 1 {
-            return m.to_string(); // Single capital word
-        }
-        // Python: len(matches) == len(match) means all single-char matches → all uppercase
-        if matches.len() == m.len() {
-            return m.to_string(); // All uppercase
-        }
-        // Python: len(matches) == len(match)-1 and ends with 's' → plural uppercase (e.g. "TPUs")
-        if matches.len() == m.len() - 1 && m.ends_with('s') {
-            return format!("{}'s", &m[..m.len() - 1]); // Plural uppercase
-        }
-        matches.join(" ")
-    }).to_string()
+            if matches.len() <= 1 {
+                return m.to_string(); // Single capital word
+            }
+            // Python: len(matches) == len(match) means all single-char matches → all uppercase
+            if matches.len() == m.len() {
+                return m.to_string(); // All uppercase
+            }
+            // Python: len(matches) == len(match)-1 and ends with 's' → plural uppercase (e.g. "TPUs")
+            if matches.len() == m.len() - 1 && m.ends_with('s') {
+                return format!("{}'s", &m[..m.len() - 1]); // Plural uppercase
+            }
+            matches.join(" ")
+        })
+        .to_string()
 }
 
 fn expand_special_characters(text: &str) -> String {
@@ -630,7 +864,9 @@ fn dedup_punctuation(text: &str) -> String {
     text = DOT_PUNCT_RE.replace_all(&text, ".").to_string();
     text = BANG_PUNCT_RE.replace_all(&text, "!").to_string();
     text = QUESTION_PUNCT_RE.replace_all(&text, "?").to_string();
-    text = ELLIPSIS_PLACEHOLDER_RE.replace_all(&text, "...").to_string();
+    text = ELLIPSIS_PLACEHOLDER_RE
+        .replace_all(&text, "...")
+        .to_string();
     text
 }
 
@@ -662,7 +898,7 @@ fn collapse_triple_letters(text: &str) -> String {
 
 /// Apply all text cleaning transformations matching Python's `clean_text()`.
 pub fn clean_text(text: &str) -> String {
-    let text = expand_preunicode(&text);
+    let text = expand_preunicode(text);
     let text = convert_to_ascii(&text);
     let text = normalize_newlines(&text);
     let text = normalize_numbers(&text);
@@ -674,8 +910,8 @@ pub fn clean_text(text: &str) -> String {
     let text = remove_unknown_characters(&text);
     let text = collapse_whitespace(&text);
     let text = dedup_punctuation(&text);
-    let text = collapse_triple_letters(&text);
-    text
+
+    collapse_triple_letters(&text)
 }
 
 /// Normalize raw text for Soprano TTS input.
@@ -698,7 +934,10 @@ mod tests {
         assert_eq!(number_to_words(100), "one hundred");
         assert_eq!(number_to_words(123), "one hundred twenty-three");
         assert_eq!(number_to_words(1000), "one thousand");
-        assert_eq!(number_to_words(1234), "one thousand, two hundred thirty-four");
+        assert_eq!(
+            number_to_words(1234),
+            "one thousand, two hundred thirty-four"
+        );
     }
 
     #[test]
@@ -782,7 +1021,10 @@ mod tests {
     #[test]
     fn test_camelcase() {
         assert_eq!(clean_text("LMDeploy"), "l m deploy.");
-        assert_eq!(clean_text("LMDeployDecoderModel"), "l m deploy decoder model.");
+        assert_eq!(
+            clean_text("LMDeployDecoderModel"),
+            "l m deploy decoder model."
+        );
         assert_eq!(clean_text("Test"), "test.");
         assert_eq!(clean_text("UPPERCASE"), "uppercase.");
         assert_eq!(clean_text("TPUs"), "tpu's.");
@@ -804,13 +1046,22 @@ mod tests {
 
     #[test]
     fn test_decimals() {
-        assert_eq!(clean_text("2.47023"), "two point four seven zero two three.");
-        assert_eq!(clean_text("1.17.1.1"), "one point one seven point one point one.");
+        assert_eq!(
+            clean_text("2.47023"),
+            "two point four seven zero two three."
+        );
+        assert_eq!(
+            clean_text("1.17.1.1"),
+            "one point one seven point one point one."
+        );
     }
 
     #[test]
     fn test_dates() {
-        assert_eq!(clean_text("1/1/2025"), "one dash one dash twenty twenty-five.");
+        assert_eq!(
+            clean_text("1/1/2025"),
+            "one dash one dash twenty twenty-five."
+        );
         assert_eq!(clean_text("A 1/1/11 A"), "a one dash one dash eleven a.");
     }
 

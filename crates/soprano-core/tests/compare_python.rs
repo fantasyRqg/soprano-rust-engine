@@ -5,8 +5,9 @@ use soprano_core::inference::backbone;
 use soprano_core::inference::decoder;
 use soprano_core::inference::sampler::SamplingParams;
 use soprano_core::inference::session::load_session;
-use soprano_core::text::tokenizer::SopranoTokenizer;
 use soprano_core::text::normalizer;
+use soprano_core::text::tokenizer::SopranoTokenizer;
+use soprano_core::ExecutionProvider;
 
 fn models_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
@@ -28,7 +29,10 @@ fn load_npy_i64(path: &str) -> Vec<i64> {
     let bytes = std::fs::read(path).unwrap();
     // Simple npy parser for 1D int64 arrays
     // Skip header, find data
-    let header_end = bytes.windows(1).position(|w| w[0] == b'\n' && bytes[..bytes.len()].contains(&0x0A)).unwrap_or(0);
+    let header_end = bytes
+        .windows(1)
+        .position(|w| w[0] == b'\n' && bytes[..bytes.len()].contains(&0x0A))
+        .unwrap_or(0);
     // Find the \n after the header dict
     let mut pos = 0;
     // npy format: magic(6) + version(2) + header_len(2/4) + header
@@ -115,8 +119,10 @@ fn test_compare_tokens_with_python() {
             dir.join("soprano_backbone_kv_f16.onnx")
         } else {
             dir.join("soprano_backbone_kv.onnx")
-        }
-    ).unwrap();
+        },
+        &ExecutionProvider::Cpu,
+    )
+    .unwrap();
 
     let params = SamplingParams {
         temperature: 0.0, // greedy to match Python
@@ -127,14 +133,22 @@ fn test_compare_tokens_with_python() {
 
     let output = backbone::generate(&mut backbone_session, &input_ids, &params).unwrap();
 
-    eprintln!("Rust generated {} tokens: {:?}", output.generated_tokens.len(), output.generated_tokens);
+    eprintln!(
+        "Rust generated {} tokens: {:?}",
+        output.generated_tokens.len(),
+        output.generated_tokens
+    );
     eprintln!("Rust hidden states: {} vectors", output.hidden_states.len());
     eprintln!("Hallucinated: {}", output.hallucinated);
 
     // Load Python reference tokens
     let ref_tokens = load_npy_i64("/tmp/soprano_ref_tokens.npy");
     let ref_tokens_u32: Vec<u32> = ref_tokens.iter().map(|&t| t as u32).collect();
-    eprintln!("Python ref tokens ({}): {:?}", ref_tokens_u32.len(), ref_tokens_u32);
+    eprintln!(
+        "Python ref tokens ({}): {:?}",
+        ref_tokens_u32.len(),
+        ref_tokens_u32
+    );
 
     // Compare tokens
     let match_len = output.generated_tokens.len().min(ref_tokens_u32.len());
@@ -147,11 +161,16 @@ fn test_compare_tokens_with_python() {
     }
 
     if let Some(pos) = first_mismatch {
-        eprintln!("MISMATCH at token {}: rust={}, python={}",
-            pos, output.generated_tokens[pos], ref_tokens_u32[pos]);
+        eprintln!(
+            "MISMATCH at token {}: rust={}, python={}",
+            pos, output.generated_tokens[pos], ref_tokens_u32[pos]
+        );
     } else if output.generated_tokens.len() != ref_tokens_u32.len() {
-        eprintln!("Token count differs: rust={}, python={}",
-            output.generated_tokens.len(), ref_tokens_u32.len());
+        eprintln!(
+            "Token count differs: rust={}, python={}",
+            output.generated_tokens.len(),
+            ref_tokens_u32.len()
+        );
     } else {
         eprintln!("ALL TOKENS MATCH!");
     }
@@ -163,22 +182,40 @@ fn test_compare_tokens_with_python() {
                 dir.join("soprano_decoder_f16.onnx")
             } else {
                 dir.join("soprano_decoder.onnx")
-            }
-        ).unwrap();
+            },
+            &ExecutionProvider::Cpu,
+        )
+        .unwrap();
 
         let audio = decoder::decode_all(&mut decoder_session, &output.hidden_states).unwrap();
-        eprintln!("Rust audio: {} samples ({:.2}s)", audio.len(), audio.len() as f64 / 32000.0);
+        eprintln!(
+            "Rust audio: {} samples ({:.2}s)",
+            audio.len(),
+            audio.len() as f64 / 32000.0
+        );
 
         // Load Python reference audio
         let ref_audio = load_npy_f32("/tmp/soprano_ref_audio.npy");
-        eprintln!("Python ref audio: {} samples ({:.2}s)", ref_audio.len(), ref_audio.len() as f64 / 32000.0);
+        eprintln!(
+            "Python ref audio: {} samples ({:.2}s)",
+            ref_audio.len(),
+            ref_audio.len() as f64 / 32000.0
+        );
 
         // Compute SNR
         let min_len = audio.len().min(ref_audio.len());
         if min_len > 0 {
-            let signal_power: f64 = ref_audio[..min_len].iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / min_len as f64;
-            let noise_power: f64 = audio[..min_len].iter().zip(&ref_audio[..min_len])
-                .map(|(&a, &b)| ((a - b) as f64).powi(2)).sum::<f64>() / min_len as f64;
+            let signal_power: f64 = ref_audio[..min_len]
+                .iter()
+                .map(|&x| (x as f64).powi(2))
+                .sum::<f64>()
+                / min_len as f64;
+            let noise_power: f64 = audio[..min_len]
+                .iter()
+                .zip(&ref_audio[..min_len])
+                .map(|(&a, &b)| ((a - b) as f64).powi(2))
+                .sum::<f64>()
+                / min_len as f64;
 
             if noise_power > 0.0 {
                 let snr = 10.0 * (signal_power / noise_power).log10();
@@ -188,8 +225,11 @@ fn test_compare_tokens_with_python() {
                 eprintln!("Outputs are identical (infinite SNR)");
             }
 
-            let max_err: f32 = audio[..min_len].iter().zip(&ref_audio[..min_len])
-                .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            let max_err: f32 = audio[..min_len]
+                .iter()
+                .zip(&ref_audio[..min_len])
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
             eprintln!("Max error: {:.6}", max_err);
         }
     }
@@ -198,11 +238,21 @@ fn test_compare_tokens_with_python() {
     // Small divergence at the end is acceptable due to f16 floating point differences
     // in ONNX Runtime between Python and Rust bindings.
     let min_len = output.generated_tokens.len().min(ref_tokens_u32.len());
-    let matching = output.generated_tokens[..min_len].iter()
+    let matching = output.generated_tokens[..min_len]
+        .iter()
         .zip(&ref_tokens_u32[..min_len])
         .take_while(|(a, b)| a == b)
         .count();
     let match_pct = matching as f64 / ref_tokens_u32.len() as f64 * 100.0;
-    eprintln!("Token match: {}/{} ({:.0}%)", matching, ref_tokens_u32.len(), match_pct);
-    assert!(match_pct >= 95.0, "too few matching tokens: {:.0}%", match_pct);
+    eprintln!(
+        "Token match: {}/{} ({:.0}%)",
+        matching,
+        ref_tokens_u32.len(),
+        match_pct
+    );
+    assert!(
+        match_pct >= 95.0,
+        "too few matching tokens: {:.0}%",
+        match_pct
+    );
 }

@@ -19,6 +19,7 @@ pub const SAMPLES_PER_TOKEN: usize = 2048;
 /// Streaming decoder constants.
 pub const RECEPTIVE_FIELD: usize = 4;
 pub const CHUNK_SIZE: usize = 8;
+pub const STREAM_CROSSFADE_SAMPLES: usize = 512;
 
 /// Load an ONNX model session from file with the given execution provider.
 pub fn load_session(path: impl AsRef<Path>, ep: &ExecutionProvider) -> Result<Session, String> {

@@ -73,6 +73,7 @@ A cross-platform real-time text-to-speech engine written in Rust, wrapping the S
 
 ```bash
 cargo run -p soprano-cli -- "Hello, world!" --model models/ --output output.wav
+cargo run -p soprano-cli -- --input-file input.txt --model models/ --output output.wav
 ```
 
 Options:
@@ -183,4 +184,3 @@ On-device benchmarks (Samsung Galaxy S24, CPU execution provider):
 | Model load | ~730 ms |
 | First-byte latency | ~700 ms |
 | Real-time factor | ~4.3x faster than real-time |
-

@@ -1,7 +1,7 @@
 //! End-to-end integration test for the Soprano TTS engine.
 
-use std::sync::{Arc, Mutex, Condvar};
 use soprano_core::{AudioSink, SinkError, SopranoConfig, SopranoTTS};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Simple test sink that collects all audio samples.
 struct CollectorSink {
@@ -57,7 +57,10 @@ impl AudioSink for CollectorSink {
     }
 
     fn on_sentence_complete(&mut self, sentence_index: usize) {
-        self.sentences_completed.lock().unwrap().push(sentence_index);
+        self.sentences_completed
+            .lock()
+            .unwrap()
+            .push(sentence_index);
     }
 
     fn on_drain_complete(&mut self) {
@@ -73,8 +76,7 @@ impl AudioSink for CollectorSink {
 }
 
 fn models_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../models")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
 }
 
 fn models_available() -> bool {
@@ -89,7 +91,10 @@ fn models_available() -> bool {
 #[test]
 fn test_e2e_basic_synthesis() {
     if !models_available() {
-        eprintln!("Skipping e2e test: model files not found in {:?}", models_dir());
+        eprintln!(
+            "Skipping e2e test: model files not found in {:?}",
+            models_dir()
+        );
         return;
     }
 
@@ -106,8 +111,10 @@ fn test_e2e_basic_synthesis() {
 
     let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
 
-    // Feed a short sentence
-    engine.feed("Hello world.").expect("feed failed");
+    // Feed two sentences so the engine exercises chunking.
+    engine
+        .feed("Hello world. Enough of this.")
+        .expect("feed failed");
     engine.drain();
 
     let samples = samples_ref.lock().unwrap();
@@ -115,7 +122,8 @@ fn test_e2e_basic_synthesis() {
     let sentences = sentences_ref.lock().unwrap();
 
     // Print diagnostics
-    eprintln!("Generated {} audio samples ({:.2}s at 32kHz)",
+    eprintln!(
+        "Generated {} audio samples ({:.2}s at 32kHz)",
         samples.len(),
         samples.len() as f64 / 32000.0
     );
@@ -126,8 +134,8 @@ fn test_e2e_basic_synthesis() {
     assert!(!samples.is_empty(), "no audio samples generated");
     assert!(samples.len() > 1000, "too few samples: {}", samples.len());
 
-    // Should have completed one sentence
-    assert_eq!(sentences.len(), 1, "expected 1 sentence complete callback");
+    // Should have completed two chunked sentences
+    assert_eq!(sentences.len(), 2, "expected 2 sentence complete callbacks");
 
     // Should have no errors
     assert!(errors.is_empty(), "unexpected errors: {:?}", *errors);
@@ -154,15 +162,24 @@ fn test_e2e_input_too_long() {
 
     let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
 
-    // Feed a very long string that should exceed 512 tokens
-    let long_text = "hello world. ".repeat(500);
-    engine.feed(&long_text).expect("feed should succeed (async)");
+    // Feed a single oversized sentence that should still exceed 512 tokens.
+    let long_text = "hello ".repeat(700);
+    engine
+        .feed(&long_text)
+        .expect("feed should succeed (async)");
     engine.drain();
 
     let errors = errors_ref.lock().unwrap();
     eprintln!("Errors for long input: {:?}", *errors);
-    assert!(!errors.is_empty(), "expected an error for overly long input");
-    assert!(errors[0].contains("too long"), "expected 'too long' error, got: {}", errors[0]);
+    assert!(
+        !errors.is_empty(),
+        "expected an error for overly long input"
+    );
+    assert!(
+        errors[0].contains("too long"),
+        "expected 'too long' error, got: {}",
+        errors[0]
+    );
 }
 
 #[test]
@@ -180,8 +197,10 @@ fn test_e2e_estimate() {
     let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
 
     let est = engine.estimate("Hello world.");
-    eprintln!("Estimate: {} samples, {} bytes, {}ms",
-        est.pcm_samples, est.pcm_bytes, est.duration_ms);
+    eprintln!(
+        "Estimate: {} samples, {} bytes, {}ms",
+        est.pcm_samples, est.pcm_bytes, est.duration_ms
+    );
 
     assert!(est.pcm_samples > 0);
     assert_eq!(est.pcm_bytes, est.pcm_samples * 2);

@@ -2,7 +2,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
-use soprano_core::{AudioSink, ExecutionProvider, SinkError, SopranoConfig, SopranoTTS, SAMPLE_RATE};
+use soprano_core::{
+    AudioSink, ExecutionProvider, SinkError, SopranoConfig, SopranoTTS, SAMPLE_RATE,
+};
 
 #[derive(Clone, ValueEnum)]
 enum Ep {
@@ -12,7 +14,10 @@ enum Ep {
 }
 
 #[derive(Parser)]
-#[command(name = "soprano-bench", about = "Benchmark Soprano TTS inference on-device")]
+#[command(
+    name = "soprano-bench",
+    about = "Benchmark Soprano TTS inference on-device"
+)]
 struct Cli {
     /// Path to model directory
     #[arg(short, long)]
@@ -27,7 +32,11 @@ struct Cli {
     iterations: usize,
 
     /// Text to synthesize
-    #[arg(short, long, default_value = "Hello, this is a benchmark of the Soprano text to speech engine running on device.")]
+    #[arg(
+        short,
+        long,
+        default_value = "Hello, this is a benchmark of the Soprano text to speech engine running on device."
+    )]
     text: String,
 }
 
@@ -61,7 +70,9 @@ impl AudioSink for CountingSink {
         *self.sample_count.lock().unwrap() += samples.len();
         Ok(samples.len())
     }
-    fn available(&self) -> usize { usize::MAX }
+    fn available(&self) -> usize {
+        usize::MAX
+    }
     fn on_sentence_complete(&mut self, _: usize) {}
     fn on_drain_complete(&mut self) {}
     fn on_error(&mut self, error: String) {
@@ -132,9 +143,15 @@ fn main() {
         let samples = *sample_count_ref.lock().unwrap();
         let audio_sec = samples as f64 / SAMPLE_RATE as f64;
         let synth_sec = synth_ms as f64 / 1000.0;
-        let rtf = if synth_sec > 0.0 { audio_sec / synth_sec } else { 0.0 };
+        let rtf = if synth_sec > 0.0 {
+            audio_sec / synth_sec
+        } else {
+            0.0
+        };
 
-        let first_byte_ms = first_write_ref.lock().unwrap()
+        let first_byte_ms = first_write_ref
+            .lock()
+            .unwrap()
             .map(|t| t.duration_since(t_synth).as_millis())
             .unwrap_or(0);
 
@@ -150,6 +167,12 @@ fn main() {
         let max = rtfs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let avg = rtfs.iter().sum::<f64>() / rtfs.len() as f64;
         eprintln!();
-        eprintln!("RTF summary: min={:.2}x  max={:.2}x  avg={:.2}x  (n={})", min, max, avg, rtfs.len());
+        eprintln!(
+            "RTF summary: min={:.2}x  max={:.2}x  avg={:.2}x  (n={})",
+            min,
+            max,
+            avg,
+            rtfs.len()
+        );
     }
 }

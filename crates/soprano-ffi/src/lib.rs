@@ -4,8 +4,8 @@
 //! The AudioSink trait is exposed as a callback interface that receives
 //! PCM data as raw bytes (little-endian i16).
 
-use std::sync::{Arc, Mutex};
 use soprano_core::{AudioSink, SinkError};
+use std::sync::{Arc, Mutex};
 
 uniffi::setup_scaffolding!();
 
@@ -29,15 +29,16 @@ impl From<soprano_core::SopranoError> for FfiError {
     fn from(e: soprano_core::SopranoError) -> Self {
         match e {
             soprano_core::SopranoError::ModelLoadError(msg) => FfiError::ModelLoadError { msg },
-            soprano_core::SopranoError::InputTooLong { token_count, max_tokens } => {
-                FfiError::InputTooLong {
-                    token_count: token_count as u32,
-                    max_tokens: max_tokens as u32,
-                }
-            }
-            soprano_core::SopranoError::NoSink => {
-                FfiError::InferenceError { msg: "no sink attached".to_string() }
-            }
+            soprano_core::SopranoError::InputTooLong {
+                token_count,
+                max_tokens,
+            } => FfiError::InputTooLong {
+                token_count: token_count as u32,
+                max_tokens: max_tokens as u32,
+            },
+            soprano_core::SopranoError::NoSink => FfiError::InferenceError {
+                msg: "no sink attached".to_string(),
+            },
             soprano_core::SopranoError::InferenceError(msg) => FfiError::InferenceError { msg },
             soprano_core::SopranoError::Hallucination => FfiError::Hallucination,
             soprano_core::SopranoError::TokenizationError(msg) => {
@@ -121,10 +122,7 @@ struct SinkAdapter {
 impl AudioSink for SinkAdapter {
     fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError> {
         // Convert i16 slice to bytes (little-endian)
-        let bytes: Vec<u8> = samples
-            .iter()
-            .flat_map(|s| s.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let bytes_written = self.inner.write_pcm(bytes);
         if bytes_written < 0 {
             return Err(SinkError::Closed);
@@ -211,13 +209,7 @@ impl SopranoTts {
     }
 
     /// Update sampling parameters (takes effect on next sentence).
-    pub fn set_params(
-        &self,
-        temperature: f32,
-        top_k: u32,
-        top_p: f32,
-        repetition_penalty: f32,
-    ) {
+    pub fn set_params(&self, temperature: f32, top_k: u32, top_p: f32, repetition_penalty: f32) {
         let mut engine = self.inner.lock().unwrap();
         engine.set_params(temperature, top_k as usize, top_p, repetition_penalty);
     }

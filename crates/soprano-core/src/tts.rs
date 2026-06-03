@@ -12,6 +12,7 @@ use crate::inference::backbone;
 use crate::inference::decoder;
 use crate::inference::sampler::SamplingParams;
 use crate::inference::session::*;
+use crate::text::chunker;
 use crate::text::normalizer;
 use crate::text::tokenizer::{SopranoTokenizer, MAX_TOKENS};
 
@@ -73,7 +74,10 @@ pub enum SopranoError {
     #[error("model loading failed: {0}")]
     ModelLoadError(String),
     #[error("input too long: {token_count} tokens exceeds max {max_tokens}")]
-    InputTooLong { token_count: usize, max_tokens: usize },
+    InputTooLong {
+        token_count: usize,
+        max_tokens: usize,
+    },
     #[error("no sink attached — call set_sink() before feed()")]
     NoSink,
     #[error("inference error: {0}")]
@@ -107,8 +111,8 @@ impl SopranoTTS {
 
         // Load tokenizer
         let tokenizer_path = model_path.join("tokenizer.json");
-        let tokenizer = SopranoTokenizer::from_file(&tokenizer_path)
-            .map_err(SopranoError::ModelLoadError)?;
+        let tokenizer =
+            SopranoTokenizer::from_file(&tokenizer_path).map_err(SopranoError::ModelLoadError)?;
 
         // Load ONNX sessions
         let backbone_path = find_backbone_model(model_path)?;
@@ -130,7 +134,14 @@ impl SopranoTTS {
         let initial_params = sampling_params.clone();
 
         let handle = thread::spawn(move || {
-            worker_loop(rx, &tokenizer, &mut backbone_session, &mut decoder_session, sink, initial_params);
+            worker_loop(
+                rx,
+                &tokenizer,
+                &mut backbone_session,
+                &mut decoder_session,
+                sink,
+                initial_params,
+            );
         });
 
         Ok(Self {
@@ -158,7 +169,9 @@ impl SopranoTTS {
     /// Engine normalizes, tokenizes, and errors if >512 tokens.
     pub fn feed(&self, text: &str) -> Result<(), SopranoError> {
         self.worker_tx
-            .send(WorkerMsg::Feed { text: text.to_string() })
+            .send(WorkerMsg::Feed {
+                text: text.to_string(),
+            })
             .map_err(|_| SopranoError::InferenceError("worker thread died".to_string()))
     }
 
@@ -189,7 +202,9 @@ impl SopranoTTS {
             top_p,
             repetition_penalty,
         };
-        let _ = self.worker_tx.send(WorkerMsg::UpdateParams(self.sampling_params.clone()));
+        let _ = self
+            .worker_tx
+            .send(WorkerMsg::UpdateParams(self.sampling_params.clone()));
     }
 }
 
@@ -218,58 +233,66 @@ fn worker_loop(
             Ok(WorkerMsg::Feed { text }) => {
                 // Normalize text
                 let normalized = normalizer::normalize(&text);
+                let chunks = chunker::chunk_normalized(&normalized);
 
-                // Tokenize
-                let token_ids = match tokenizer.encode(&normalized) {
-                    Ok(ids) => ids,
-                    Err(e) => {
-                        sink.on_error(format!("tokenization error: {}", e));
-                        continue;
-                    }
-                };
-
-                // Check length limit
-                if token_ids.len() > MAX_TOKENS {
-                    sink.on_error(format!(
-                        "input too long: {} tokens exceeds max {}",
-                        token_ids.len(),
-                        MAX_TOKENS
-                    ));
+                if chunks.is_empty() {
+                    sink.on_error("normalized input was empty".to_string());
                     continue;
                 }
 
-                // Convert to i64 for ONNX
-                let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
+                for chunk in chunks {
+                    // Tokenize
+                    let token_ids = match tokenizer.encode(&chunk) {
+                        Ok(ids) => ids,
+                        Err(e) => {
+                            sink.on_error(format!("tokenization error: {}", e));
+                            continue;
+                        }
+                    };
 
-                // Run backbone generation
-                let backbone_output = match backbone::generate(backbone, &input_ids, &params) {
-                    Ok(out) => out,
-                    Err(e) => {
-                        sink.on_error(format!("backbone error: {}", e));
+                    // Check length limit
+                    if token_ids.len() > MAX_TOKENS {
+                        sink.on_error(format!(
+                            "input too long: {} tokens exceeds max {}",
+                            token_ids.len(),
+                            MAX_TOKENS
+                        ));
                         continue;
                     }
-                };
 
-                if backbone_output.hallucinated {
-                    sink.on_error("hallucination detected".to_string());
+                    // Convert to i64 for ONNX
+                    let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
+
+                    // Run backbone generation
+                    let backbone_output = match backbone::generate(backbone, &input_ids, &params) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            sink.on_error(format!("backbone error: {}", e));
+                            continue;
+                        }
+                    };
+
+                    if backbone_output.hallucinated {
+                        sink.on_error("hallucination detected".to_string());
+                        sentence_index += 1;
+                        sink.on_sentence_complete(sentence_index);
+                        continue;
+                    }
+
+                    // Run decoder with streaming
+                    if !backbone_output.hidden_states.is_empty() {
+                        if let Err(e) = decoder::decode_streaming(
+                            decoder,
+                            &backbone_output.hidden_states,
+                            &mut *sink,
+                        ) {
+                            sink.on_error(format!("decoder error: {}", e));
+                        }
+                    }
+
                     sentence_index += 1;
                     sink.on_sentence_complete(sentence_index);
-                    continue;
                 }
-
-                // Run decoder with streaming
-                if !backbone_output.hidden_states.is_empty() {
-                    if let Err(e) = decoder::decode_streaming(
-                        decoder,
-                        &backbone_output.hidden_states,
-                        &mut *sink,
-                    ) {
-                        sink.on_error(format!("decoder error: {}", e));
-                    }
-                }
-
-                sentence_index += 1;
-                sink.on_sentence_complete(sentence_index);
             }
             Ok(WorkerMsg::Flush) => {
                 // Drain remaining messages from the channel
@@ -296,10 +319,7 @@ fn worker_loop(
 
 /// Find backbone model file (try f16 first, then f32).
 fn find_backbone_model(model_dir: &Path) -> Result<std::path::PathBuf, SopranoError> {
-    let candidates = [
-        "soprano_backbone_kv_f16.onnx",
-        "soprano_backbone_kv.onnx",
-    ];
+    let candidates = ["soprano_backbone_kv_f16.onnx", "soprano_backbone_kv.onnx"];
     for name in candidates {
         let path = model_dir.join(name);
         if path.exists() {
@@ -314,10 +334,7 @@ fn find_backbone_model(model_dir: &Path) -> Result<std::path::PathBuf, SopranoEr
 
 /// Find decoder model file (try f16 first, then f32).
 fn find_decoder_model(model_dir: &Path) -> Result<std::path::PathBuf, SopranoError> {
-    let candidates = [
-        "soprano_decoder_f16.onnx",
-        "soprano_decoder.onnx",
-    ];
+    let candidates = ["soprano_decoder_f16.onnx", "soprano_decoder.onnx"];
     for name in candidates {
         let path = model_dir.join(name);
         if path.exists() {

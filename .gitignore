@@ -9,6 +9,9 @@ Cargo.lock
 # Audio output
 *.wav
 
+# Local scratch text inputs for manual synthesis testing
+/*.txt
+
 # Android build artifacts
 examples/android/.gradle/
 examples/android/build/

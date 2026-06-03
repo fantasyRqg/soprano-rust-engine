@@ -1,16 +1,26 @@
+use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::Parser;
 use hound::{WavSpec, WavWriter};
-use soprano_core::{AudioSink, SinkError, SopranoConfig, SopranoTTS};
+use soprano_core::{
+    chunk_normalized, normalize, AudioSink, ExecutionProvider, SinkError, SopranoConfig, SopranoTTS,
+};
 
 #[derive(Parser)]
-#[command(name = "soprano-tts", about = "Convert text to speech using Soprano TTS")]
+#[command(
+    name = "soprano-tts",
+    about = "Convert text to speech using Soprano TTS"
+)]
 struct Cli {
     /// Text to synthesize
-    text: String,
+    text: Option<String>,
+
+    /// Read text to synthesize from a file
+    #[arg(long, conflicts_with = "text")]
+    input_file: Option<PathBuf>,
 
     /// Output WAV file path
     #[arg(short, long, default_value = "output.wav")]
@@ -35,6 +45,10 @@ struct Cli {
     /// Repetition penalty
     #[arg(long, default_value = "1.2")]
     repetition_penalty: f32,
+
+    /// Print normalized text and sentence-style chunks before synthesis
+    #[arg(long)]
+    print_chunks: bool,
 }
 
 struct WavSink {
@@ -72,6 +86,33 @@ impl AudioSink for WavSink {
 
 fn main() {
     let cli = Cli::parse();
+    let text = match (&cli.text, &cli.input_file) {
+        (Some(text), None) => text.clone(),
+        (None, Some(path)) => fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Failed to read input file {:?}: {}", path, e);
+            std::process::exit(1);
+        }),
+        (Some(_), Some(_)) => {
+            eprintln!("Provide either inline text or --input-file, not both.");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            eprintln!("Provide text or --input-file.");
+            std::process::exit(2);
+        }
+    };
+
+    if cli.print_chunks {
+        let normalized = normalize(&text);
+        eprintln!("Normalized text:");
+        eprintln!("{}", normalized);
+
+        let chunks = chunk_normalized(&normalized);
+        eprintln!("Sentence-style chunks ({}):", chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            eprintln!("  {}. {}", idx + 1, chunk);
+        }
+    }
 
     let sink = WavSink::new();
     let samples_ref = sink.samples();
@@ -82,6 +123,7 @@ fn main() {
         top_k: cli.top_k,
         top_p: cli.top_p,
         repetition_penalty: cli.repetition_penalty,
+        execution_provider: ExecutionProvider::Cpu,
     };
 
     eprintln!("Loading models from {:?}...", cli.model);
@@ -92,9 +134,9 @@ fn main() {
     });
     eprintln!("Models loaded in {:.2}s", t0.elapsed().as_secs_f64());
 
-    eprintln!("Synthesizing: \"{}\"", cli.text);
+    eprintln!("Synthesizing: \"{}\"", text);
     let t0 = Instant::now();
-    engine.feed(&cli.text).unwrap_or_else(|e| {
+    engine.feed(&text).unwrap_or_else(|e| {
         eprintln!("Feed failed: {}", e);
         std::process::exit(1);
     });
