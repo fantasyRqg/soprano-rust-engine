@@ -96,24 +96,39 @@ Outputs per-iteration metrics: model load time, first-byte latency, synthesis ti
 ## Android Example
 
 The Android app uses Jetpack Compose with an `AudioTrack`-backed audio sink.
+Requires a physical arm64 device or an arm64 emulator image (ONNX Runtime has
+no x86_64-android prebuilt).
 
-### Build
+### 1. Build the native library + bindings
 
 ```bash
-# Requires ANDROID_NDK_HOME and aarch64-linux-android target
+# Requires ANDROID_NDK_HOME, the aarch64-linux-android Rust target, and cargo-ndk
 cd examples/android
 ./build-rust.sh
-
-# Open in Android Studio and build, or use Gradle
-./gradlew assembleDebug
 ```
 
-Push models to device:
+This cross-compiles `libsoprano_ffi.so` into `app/src/main/jniLibs/` and
+regenerates the Kotlin bindings from the same library. Both are build outputs
+and are not checked in — run this before building the app.
+
+### 2. Build and install the app
 
 ```bash
-adb shell mkdir -p /data/local/tmp/soprano-models
-adb push models/*.onnx models/*.data models/tokenizer.json /data/local/tmp/soprano-models/
+./gradlew assembleDebug
+adb install app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Or open `examples/android/` in Android Studio and Run.
+
+### 3. Push model files to the device
+
+```bash
+adb push ../../models/ /sdcard/Android/data/com.example.soprano/files/soprano-models/
+```
+
+### 4. Run
+
+Launch the app, tap **Load Model** (the path is pre-filled), enter text, and tap **Speak**.
 
 See [`examples/android/README.md`](examples/android/README.md) for full setup instructions.
 
@@ -121,18 +136,24 @@ See [`examples/android/README.md`](examples/android/README.md) for full setup in
 
 The iOS app uses SwiftUI (@Observable, iOS 17+) with `AVAudioEngine` for playback.
 
-### Build
+### 1. Build the native library + bindings
 
 ```bash
-# Requires aarch64-apple-ios and aarch64-apple-ios-sim Rust targets
+# Requires the aarch64-apple-ios and aarch64-apple-ios-sim Rust targets
 cd examples/ios
 ./build-rust.sh
 ```
 
-Then:
+This builds the static libraries, regenerates the Swift bindings, and assembles
+`SopranoFFI.xcframework`. These are build outputs and are not checked in — run
+this before opening the project.
+
+### 2. Add models and run
+
 1. Copy model files into `SopranoDemo/Models/`
 2. Open `SopranoDemo/SopranoDemo.xcodeproj` in Xcode
-3. Select a physical device (or simulator), build and run
+3. Select a physical device (or simulator), build and Run
+4. In the app, tap **Load Model**, enter text, and tap **Speak**
 
 See [`examples/ios/README.md`](examples/ios/README.md) for full setup instructions.
 
