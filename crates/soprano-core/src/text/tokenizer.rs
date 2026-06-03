@@ -20,8 +20,8 @@ pub struct SopranoTokenizer {
 impl SopranoTokenizer {
     /// Load tokenizer from a tokenizer.json file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, String> {
-        let tokenizer = Tokenizer::from_file(path)
-            .map_err(|e| format!("failed to load tokenizer: {}", e))?;
+        let tokenizer =
+            Tokenizer::from_file(path).map_err(|e| format!("failed to load tokenizer: {}", e))?;
         Ok(Self { tokenizer })
     }
 
@@ -47,8 +47,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_tokenizer_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../models/tokenizer.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/tokenizer.json")
     }
 
     #[test]
@@ -60,7 +59,10 @@ mod tests {
         }
         let tok = SopranoTokenizer::from_file(&path).unwrap();
         let ids = tok.encode("[STOP][TEXT]hello world.[START]").unwrap();
-        assert_eq!(ids, vec![3, 1, 8077, 8070, 8045, 8004, 8053, 8076, 8139, 8015, 2]);
+        assert_eq!(
+            ids,
+            vec![3, 1, 8077, 8070, 8045, 8004, 8053, 8076, 8139, 8015, 2]
+        );
     }
 
     #[test]
@@ -80,7 +82,9 @@ mod tests {
     fn test_exceeds_limit() {
         let ids = vec![0u32; 513];
         assert!(SopranoTokenizer::exceeds_limit(
-            &SopranoTokenizer { tokenizer: Tokenizer::from_file(test_tokenizer_path()).unwrap() },
+            &SopranoTokenizer {
+                tokenizer: Tokenizer::from_file(test_tokenizer_path()).unwrap()
+            },
             &ids
         ));
     }

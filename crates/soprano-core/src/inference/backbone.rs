@@ -7,7 +7,7 @@ use ndarray::Array4;
 use ort::session::Session;
 use ort::value::{DynValue, Tensor};
 
-use super::sampler::{SamplingParams, sample};
+use super::sampler::{sample, SamplingParams};
 use super::session::*;
 
 /// Result of a single backbone generation run.
@@ -78,8 +78,8 @@ pub fn generate(
     let mut kv_cache: Vec<DynValue> = Vec::with_capacity(NUM_LAYERS * 2);
     for _ in 0..NUM_LAYERS * 2 {
         let empty = Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM));
-        let tensor = Tensor::from_array(empty)
-            .map_err(|e| format!("failed to create empty KV: {}", e))?;
+        let tensor =
+            Tensor::from_array(empty).map_err(|e| format!("failed to create empty KV: {}", e))?;
         kv_cache.push(tensor.into_dyn());
     }
 
@@ -90,32 +90,43 @@ pub fn generate(
     let mut hallucination_detector = HallucinationDetector::new();
 
     // Find output indices by name
-    let output_names: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
-    let logits_idx = output_names.iter().position(|n| n == "logits")
+    let output_names: Vec<String> = session
+        .outputs()
+        .iter()
+        .map(|o| o.name().to_string())
+        .collect();
+    let logits_idx = output_names
+        .iter()
+        .position(|n| n == "logits")
         .ok_or("logits output not found")?;
-    let hidden_idx = output_names.iter().position(|n| n == "last_hidden_state")
+    let hidden_idx = output_names
+        .iter()
+        .position(|n| n == "last_hidden_state")
         .ok_or("last_hidden_state output not found")?;
 
     for _step in 0..MAX_NEW_TOKENS {
         let input_len = current_ids.len();
 
         // Build input tensors
-        let ids_tensor = Tensor::from_array(
-            ([1i64, input_len as i64], current_ids.clone().into_boxed_slice())
-        ).map_err(|e| format!("input_ids: {}", e))?;
+        let ids_tensor = Tensor::from_array((
+            [1i64, input_len as i64],
+            current_ids.clone().into_boxed_slice(),
+        ))
+        .map_err(|e| format!("input_ids: {}", e))?;
 
-        let mask_tensor = Tensor::from_array(
-            ([1i64, seq_len as i64], vec![1i64; seq_len].into_boxed_slice())
-        ).map_err(|e| format!("attention_mask: {}", e))?;
+        let mask_tensor = Tensor::from_array((
+            [1i64, seq_len as i64],
+            vec![1i64; seq_len].into_boxed_slice(),
+        ))
+        .map_err(|e| format!("attention_mask: {}", e))?;
 
         let pos_ids: Vec<i64> = if input_len == 1 {
             vec![(seq_len - 1) as i64]
         } else {
             (0..input_len as i64).collect()
         };
-        let pos_tensor = Tensor::from_array(
-            ([1i64, input_len as i64], pos_ids.into_boxed_slice())
-        ).map_err(|e| format!("position_ids: {}", e))?;
+        let pos_tensor = Tensor::from_array(([1i64, input_len as i64], pos_ids.into_boxed_slice()))
+            .map_err(|e| format!("position_ids: {}", e))?;
 
         // Build named inputs
         let mut inputs: Vec<(Cow<str>, DynValue)> = Vec::new();
@@ -125,10 +136,12 @@ pub fn generate(
 
         // Add KV cache inputs — swap out values so we can move them
         for i in 0..NUM_LAYERS {
-            let k_placeholder = Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
-                .map_err(|e| format!("placeholder: {}", e))?;
-            let v_placeholder = Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
-                .map_err(|e| format!("placeholder: {}", e))?;
+            let k_placeholder =
+                Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
+                    .map_err(|e| format!("placeholder: {}", e))?;
+            let v_placeholder =
+                Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
+                    .map_err(|e| format!("placeholder: {}", e))?;
 
             let k_val = std::mem::replace(&mut kv_cache[i * 2], k_placeholder.into_dyn());
             let v_val = std::mem::replace(&mut kv_cache[i * 2 + 1], v_placeholder.into_dyn());
@@ -138,7 +151,8 @@ pub fn generate(
         }
 
         // Run backbone inference
-        let outputs = session.run(inputs)
+        let outputs = session
+            .run(inputs)
             .map_err(|e| format!("backbone inference failed: {}", e))?;
 
         // Extract logits for the last token position
@@ -163,9 +177,13 @@ pub fn generate(
         for i in 0..NUM_LAYERS {
             let k_name = format!("present.{}.key", i);
             let v_name = format!("present.{}.value", i);
-            let k_out_idx = output_names.iter().position(|n| n == &k_name)
+            let k_out_idx = output_names
+                .iter()
+                .position(|n| n == &k_name)
                 .ok_or_else(|| format!("{} not found in outputs", k_name))?;
-            let v_out_idx = output_names.iter().position(|n| n == &v_name)
+            let v_out_idx = output_names
+                .iter()
+                .position(|n| n == &v_name)
                 .ok_or_else(|| format!("{} not found in outputs", v_name))?;
 
             // Extract data and recreate tensors (we can't move from SessionOutputs)
@@ -179,12 +197,13 @@ pub fn generate(
             let k_shape_vec: Vec<usize> = k_shape.iter().map(|&d| d as usize).collect();
             let v_shape_vec: Vec<usize> = v_shape.iter().map(|&d| d as usize).collect();
 
-            kv_cache[i * 2] = Tensor::from_array(
-                (k_shape_vec, k_data.to_vec().into_boxed_slice())
-            ).map_err(|e| format!("recreate {}: {}", k_name, e))?.into_dyn();
-            kv_cache[i * 2 + 1] = Tensor::from_array(
-                (v_shape_vec, v_data.to_vec().into_boxed_slice())
-            ).map_err(|e| format!("recreate {}: {}", v_name, e))?.into_dyn();
+            kv_cache[i * 2] = Tensor::from_array((k_shape_vec, k_data.to_vec().into_boxed_slice()))
+                .map_err(|e| format!("recreate {}: {}", k_name, e))?
+                .into_dyn();
+            kv_cache[i * 2 + 1] =
+                Tensor::from_array((v_shape_vec, v_data.to_vec().into_boxed_slice()))
+                    .map_err(|e| format!("recreate {}: {}", v_name, e))?
+                    .into_dyn();
         }
 
         // Sample next token

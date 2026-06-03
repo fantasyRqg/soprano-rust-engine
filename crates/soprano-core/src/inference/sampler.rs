@@ -55,7 +55,13 @@ pub fn sample(
 
     // Greedy mode: just find argmax
     if params.temperature <= 0.0 {
-        return greedy_sample(logits, seen_tokens, use_rep_penalty, params.repetition_penalty, inv_rep_penalty);
+        return greedy_sample(
+            logits,
+            seen_tokens,
+            use_rep_penalty,
+            params.repetition_penalty,
+            inv_rep_penalty,
+        );
     }
 
     // Sampling mode
@@ -68,14 +74,25 @@ pub fn sample(
     if k < vocab_size {
         // Top-k path: use partial sort to find top-k tokens
         top_k_sample(
-            logits, seen_tokens, params, use_rep_penalty,
-            inv_temp, inv_rep_penalty, k, rng,
+            logits,
+            seen_tokens,
+            params,
+            use_rep_penalty,
+            inv_temp,
+            inv_rep_penalty,
+            k,
+            rng,
         )
     } else {
         // Full softmax path
         full_softmax_sample(
-            logits, seen_tokens, params, use_rep_penalty,
-            inv_temp, inv_rep_penalty, rng,
+            logits,
+            seen_tokens,
+            params,
+            use_rep_penalty,
+            inv_temp,
+            inv_rep_penalty,
+            rng,
         )
     }
 }
@@ -128,7 +145,8 @@ fn top_k_sample(
         .enumerate()
         .map(|(i, &logit)| {
             let is_seen = seen_tokens.get(i).copied().unwrap_or(false);
-            let s = apply_penalty(logit, is_seen, use_rep, params.repetition_penalty, inv_rep) * inv_temp;
+            let s = apply_penalty(logit, is_seen, use_rep, params.repetition_penalty, inv_rep)
+                * inv_temp;
             (s, i as u32)
         })
         .collect();
@@ -200,7 +218,8 @@ fn full_softmax_sample(
         .enumerate()
         .map(|(i, &logit)| {
             let is_seen = seen_tokens.get(i).copied().unwrap_or(false);
-            let s = apply_penalty(logit, is_seen, use_rep, params.repetition_penalty, inv_rep) * inv_temp;
+            let s = apply_penalty(logit, is_seen, use_rep, params.repetition_penalty, inv_rep)
+                * inv_temp;
             if s > max_score {
                 max_score = s;
                 best_id = i as u32;
