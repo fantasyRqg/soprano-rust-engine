@@ -103,11 +103,7 @@ fn greedy_sample(logits: &[f32], seen_tokens: &[bool], params: &SamplingParams) 
     best_id
 }
 
-fn sample_from_sorted_scores(
-    scored: &[(f32, u32)],
-    top_p: f32,
-    rng: &mut impl Rng,
-) -> u32 {
+fn sample_from_sorted_scores(scored: &[(f32, u32)], top_p: f32, rng: &mut impl Rng) -> u32 {
     if scored.is_empty() {
         return 0;
     }

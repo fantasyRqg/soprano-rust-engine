@@ -299,22 +299,20 @@ fn worker_loop(
                     let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
 
                     // Run backbone generation
-                    let backbone_output = match backbone::generate_cancellable(
-                        backbone,
-                        &input_ids,
-                        &params,
-                        || cancel_flag.load(Ordering::SeqCst),
-                    ) {
-                        Ok(Some(out)) => out,
-                        Ok(None) => {
-                            cancelled = true;
-                            break;
-                        }
-                        Err(e) => {
-                            sink.on_error(format!("backbone error: {}", e));
-                            continue;
-                        }
-                    };
+                    let backbone_output =
+                        match backbone::generate_cancellable(backbone, &input_ids, &params, || {
+                            cancel_flag.load(Ordering::SeqCst)
+                        }) {
+                            Ok(Some(out)) => out,
+                            Ok(None) => {
+                                cancelled = true;
+                                break;
+                            }
+                            Err(e) => {
+                                sink.on_error(format!("backbone error: {}", e));
+                                continue;
+                            }
+                        };
 
                     if backbone_output.hallucinated {
                         sink.on_error("hallucination detected".to_string());

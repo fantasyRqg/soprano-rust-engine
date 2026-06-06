@@ -62,7 +62,10 @@ impl AudioSink for CollectorSink {
 
     fn on_sentence_start(&mut self, tag: u64, sample_offset: u64) {
         let received = self.samples.lock().unwrap().len() as u64;
-        self.starts.lock().unwrap().push((tag, sample_offset, received));
+        self.starts
+            .lock()
+            .unwrap()
+            .push((tag, sample_offset, received));
     }
 
     fn on_drain_complete(&mut self) {

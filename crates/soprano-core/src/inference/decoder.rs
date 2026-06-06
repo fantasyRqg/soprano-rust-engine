@@ -94,13 +94,10 @@ pub fn decode_streaming(
     hidden_states: &[Vec<f32>],
     sink: &mut dyn AudioSink,
 ) -> Result<usize, String> {
-    Ok(decode_streaming_cancellable(
-        session,
-        hidden_states,
-        sink,
-        || false,
-    )?
-    .expect("non-cancellable decoding cannot be cancelled"))
+    Ok(
+        decode_streaming_cancellable(session, hidden_states, sink, || false)?
+            .expect("non-cancellable decoding cannot be cancelled"),
+    )
 }
 
 pub(crate) fn decode_streaming_cancellable(
