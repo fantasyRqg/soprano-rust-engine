@@ -258,6 +258,17 @@ fn test_e2e_one_marker_per_feed() {
         return;
     }
 
+    // Precondition: this input must split into multiple chunks, otherwise the
+    // "one marker per multi-chunk feed" property is not actually exercised.
+    let chunk_count =
+        soprano_core::chunk_normalized(&soprano_core::normalize("Hello world. Enough of this."))
+            .len();
+    assert!(
+        chunk_count > 1,
+        "test input must produce multiple chunks to be meaningful, got {chunk_count}"
+    );
+    eprintln!("Precondition chunk_count: {chunk_count}");
+
     let sink = CollectorSink::new(1_000_000);
     let starts_ref = sink.starts();
 
