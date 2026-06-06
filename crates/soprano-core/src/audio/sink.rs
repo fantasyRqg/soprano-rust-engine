@@ -20,8 +20,12 @@ pub trait AudioSink: Send {
     /// relies on `write()` for backpressure.
     fn available(&self) -> usize;
 
-    /// Called when a sentence finishes.
-    fn on_sentence_complete(&mut self, sentence_index: usize);
+    /// Called once per `feed`, just before that sentence's audio begins
+    /// streaming to the sink. `tag` is the app-defined value passed to `feed`.
+    /// `sample_offset` is the cumulative i16 sample count (mono, 32kHz) written
+    /// to this sink since the start of the current stream (resets on flush) —
+    /// i.e. the sample index at which this sentence's audio begins.
+    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64);
 
     /// Called when all queued sentences are done.
     fn on_drain_complete(&mut self);

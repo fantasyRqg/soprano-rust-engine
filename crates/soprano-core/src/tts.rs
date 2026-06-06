@@ -91,7 +91,7 @@ pub enum SopranoError {
 
 /// Internal message for the worker thread.
 enum WorkerMsg {
-    Feed { text: String },
+    Feed { text: String, tag: u64 },
     Flush,
     Drain { done_tx: mpsc::Sender<()> },
     UpdateParams(SamplingParams),
@@ -173,13 +173,18 @@ impl SopranoTTS {
 
     /// Feed text for synthesis. Non-blocking — queues internally.
     ///
+    /// `tag` is an opaque app-defined identifier echoed back via
+    /// `AudioSink::on_sentence_start` at the sample where this feed's audio
+    /// begins. The engine never interprets it.
+    ///
     /// This only returns queueing errors, such as a stopped worker. Synthesis
     /// errors from normalization, tokenization, inference, or decoding are
     /// delivered asynchronously through `AudioSink::on_error`.
-    pub fn feed(&self, text: &str) -> Result<(), SopranoError> {
+    pub fn feed(&self, text: &str, tag: u64) -> Result<(), SopranoError> {
         self.worker_tx
             .send(WorkerMsg::Feed {
                 text: text.to_string(),
+                tag,
             })
             .map_err(|_| SopranoError::InferenceError("worker thread died".to_string()))
     }
@@ -242,11 +247,11 @@ fn worker_loop(
     mut params: SamplingParams,
     cancel_flag: Arc<AtomicBool>,
 ) {
-    let mut sentence_index = 0usize;
+    let mut total_samples_written: u64 = 0;
 
     loop {
         match rx.recv() {
-            Ok(WorkerMsg::Feed { text }) => {
+            Ok(WorkerMsg::Feed { text, tag }) => {
                 if cancel_flag.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -259,6 +264,10 @@ fn worker_loop(
                     sink.on_error("normalized input was empty".to_string());
                     continue;
                 }
+
+                // One marker per feed: the next samples written belong to this
+                // feed, starting at the current cumulative sample offset.
+                sink.on_sentence_start(tag, total_samples_written);
 
                 let mut cancelled = false;
                 for chunk in chunks {
@@ -309,8 +318,6 @@ fn worker_loop(
 
                     if backbone_output.hallucinated {
                         sink.on_error("hallucination detected".to_string());
-                        sentence_index += 1;
-                        sink.on_sentence_complete(sentence_index);
                         continue;
                     }
 
@@ -322,7 +329,9 @@ fn worker_loop(
                             &mut *sink,
                             || cancel_flag.load(Ordering::SeqCst),
                         ) {
-                            Ok(Some(_)) => {}
+                            Ok(Some(n)) => {
+                                total_samples_written += n as u64;
+                            }
                             Ok(None) => {
                                 cancelled = true;
                                 break;
@@ -332,9 +341,6 @@ fn worker_loop(
                             }
                         }
                     }
-
-                    sentence_index += 1;
-                    sink.on_sentence_complete(sentence_index);
                 }
 
                 if cancelled {
@@ -356,7 +362,7 @@ fn worker_loop(
                         WorkerMsg::Flush | WorkerMsg::Feed { .. } => {}
                     }
                 }
-                sentence_index = 0;
+                total_samples_written = 0;
                 cancel_flag.store(false, Ordering::SeqCst);
             }
             Ok(WorkerMsg::Drain { done_tx }) => {

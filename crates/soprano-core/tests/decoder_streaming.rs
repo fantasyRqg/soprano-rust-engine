@@ -16,7 +16,7 @@ impl AudioSink for Collector {
     fn available(&self) -> usize {
         usize::MAX
     }
-    fn on_sentence_complete(&mut self, _: usize) {}
+    fn on_sentence_start(&mut self, _: u64, _: u64) {}
     fn on_drain_complete(&mut self) {}
     fn on_error(&mut self, _: String) {}
 }

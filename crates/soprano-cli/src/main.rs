@@ -77,7 +77,7 @@ impl AudioSink for WavSink {
         usize::MAX
     }
 
-    fn on_sentence_complete(&mut self, _sentence_index: usize) {}
+    fn on_sentence_start(&mut self, _tag: u64, _sample_offset: u64) {}
     fn on_drain_complete(&mut self) {}
     fn on_error(&mut self, error: String) {
         eprintln!("Error: {}", error);
@@ -136,7 +136,7 @@ fn main() {
 
     eprintln!("Synthesizing: \"{}\"", text);
     let t0 = Instant::now();
-    engine.feed(&text).unwrap_or_else(|e| {
+    engine.feed(&text, 0).unwrap_or_else(|e| {
         eprintln!("Feed failed: {}", e);
         std::process::exit(1);
     });

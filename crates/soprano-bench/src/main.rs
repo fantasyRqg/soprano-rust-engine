@@ -73,7 +73,7 @@ impl AudioSink for CountingSink {
     fn available(&self) -> usize {
         usize::MAX
     }
-    fn on_sentence_complete(&mut self, _: usize) {}
+    fn on_sentence_start(&mut self, _: u64, _: u64) {}
     fn on_drain_complete(&mut self) {}
     fn on_error(&mut self, error: String) {
         eprintln!("  ERROR: {}", error);
@@ -130,7 +130,7 @@ fn main() {
 
         // Synthesize
         let t_synth = Instant::now();
-        if let Err(e) = engine.feed(&cli.text) {
+        if let Err(e) = engine.feed(&cli.text, 0) {
             eprintln!("[iter {}] Feed failed: {}", i + 1, e);
             continue;
         }
