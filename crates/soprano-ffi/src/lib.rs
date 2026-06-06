@@ -106,8 +106,12 @@ pub trait FfiAudioSink: Send + Sync {
     /// backpressure.
     fn available_bytes(&self) -> u64;
 
-    /// Called when a sentence finishes synthesis.
-    fn on_sentence_complete(&self, sentence_index: u32);
+    /// Called once per `feed`, just before that feed's audio begins streaming.
+    /// `tag` is the value passed to `feed`; `sample_offset` is the i16 sample
+    /// index (mono, 32kHz, resets on flush) where this feed's audio starts.
+    /// Build a (sample_offset -> tag) timeline and compare against your audio
+    /// player's played-sample cursor to highlight in sync.
+    fn on_sentence_start(&self, tag: u64, sample_offset: u64);
 
     /// Called when all queued sentences are done.
     fn on_drain_complete(&self);
@@ -137,8 +141,8 @@ impl AudioSink for SinkAdapter {
         (self.inner.available_bytes() as usize) / 2
     }
 
-    fn on_sentence_complete(&mut self, sentence_index: usize) {
-        self.inner.on_sentence_complete(sentence_index as u32);
+    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64) {
+        self.inner.on_sentence_start(tag, sample_offset);
     }
 
     fn on_drain_complete(&mut self) {
@@ -192,10 +196,12 @@ impl SopranoTts {
     }
 
     /// Feed text for synthesis. Non-blocking — queues internally.
+    /// `tag` is an opaque app-defined identifier echoed back via
+    /// `on_sentence_start` at the sample where this feed's audio begins.
     /// Synthesis errors are delivered asynchronously through `on_error`.
-    pub fn feed(&self, text: String) -> Result<(), FfiError> {
+    pub fn feed(&self, text: String, tag: u64) -> Result<(), FfiError> {
         let engine = self.inner.lock().unwrap();
-        engine.feed(&text).map_err(FfiError::from)
+        engine.feed(&text, tag).map_err(FfiError::from)
     }
 
     /// Request cancellation of current inference and discard queued sentences.
