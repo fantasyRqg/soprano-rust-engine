@@ -9,6 +9,7 @@ use ort::value::{DynValue, Tensor};
 
 use super::sampler::{sample, SamplingParams};
 use super::session::*;
+use crate::text::tokenizer::TOKEN_STOP;
 
 /// Result of a single backbone generation run.
 pub struct BackboneOutput {
@@ -85,13 +86,27 @@ pub(crate) fn generate_cancellable(
 
     // Initialize KV cache as empty tensors: (1, NUM_KV_HEADS, 0, HEAD_DIM)
     // Use ndarray to create 0-dim tensors (tuple form rejects dim=0)
-    let mut kv_cache: Vec<DynValue> = Vec::with_capacity(NUM_LAYERS * 2);
+    // Option slots so each step can move the value into the session inputs
+    // and put the (owned) present.* output back without copying.
+    let mut kv_cache: Vec<Option<DynValue>> = Vec::with_capacity(NUM_LAYERS * 2);
     for _ in 0..NUM_LAYERS * 2 {
         let empty = Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM));
         let tensor =
             Tensor::from_array(empty).map_err(|e| format!("failed to create empty KV: {}", e))?;
-        kv_cache.push(tensor.into_dyn());
+        kv_cache.push(Some(tensor.into_dyn()));
     }
+
+    // KV input/output names, resolved once outside the generation loop.
+    let kv_names: Vec<[String; 4]> = (0..NUM_LAYERS)
+        .map(|i| {
+            [
+                format!("past_key_values.{}.key", i),
+                format!("past_key_values.{}.value", i),
+                format!("present.{}.key", i),
+                format!("present.{}.value", i),
+            ]
+        })
+        .collect();
 
     let mut current_ids: Vec<i64> = input_ids.to_vec();
     let mut seq_len = prompt_len;
@@ -148,24 +163,16 @@ pub(crate) fn generate_cancellable(
         inputs.push(("attention_mask".into(), mask_tensor.into_dyn()));
         inputs.push(("position_ids".into(), pos_tensor.into_dyn()));
 
-        // Add KV cache inputs — swap out values so we can move them
-        for i in 0..NUM_LAYERS {
-            let k_placeholder =
-                Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
-                    .map_err(|e| format!("placeholder: {}", e))?;
-            let v_placeholder =
-                Tensor::from_array(Array4::<f32>::zeros((1, NUM_KV_HEADS, 0, HEAD_DIM)))
-                    .map_err(|e| format!("placeholder: {}", e))?;
-
-            let k_val = std::mem::replace(&mut kv_cache[i * 2], k_placeholder.into_dyn());
-            let v_val = std::mem::replace(&mut kv_cache[i * 2 + 1], v_placeholder.into_dyn());
-
-            inputs.push((format!("past_key_values.{}.key", i).into(), k_val));
-            inputs.push((format!("past_key_values.{}.value", i).into(), v_val));
+        // Add KV cache inputs — move the values out of their slots
+        for (i, names) in kv_names.iter().enumerate() {
+            let k_val = kv_cache[i * 2].take().expect("KV key slot empty");
+            let v_val = kv_cache[i * 2 + 1].take().expect("KV value slot empty");
+            inputs.push((names[0].as_str().into(), k_val));
+            inputs.push((names[1].as_str().into(), v_val));
         }
 
         // Run backbone inference
-        let outputs = session
+        let mut outputs = session
             .run(inputs)
             .map_err(|e| format!("backbone inference failed: {}", e))?;
 
@@ -173,14 +180,18 @@ pub(crate) fn generate_cancellable(
             return Ok(None);
         }
 
-        // Extract logits for the last token position
-        let (logits_shape, logits_data) = outputs[logits_idx]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("failed to extract logits: {}", e))?;
-        let last_pos = logits_shape[1] as usize - 1;
-        let vocab = logits_shape[2] as usize;
-        let logits_offset = last_pos * vocab;
-        let logits_slice = &logits_data[logits_offset..logits_offset + vocab];
+        // Extract logits for the last token position and sample the next
+        // token while the immutable borrow of `outputs` is live.
+        let next_token = {
+            let (logits_shape, logits_data) = outputs[logits_idx]
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("failed to extract logits: {}", e))?;
+            let last_pos = logits_shape[1] as usize - 1;
+            let vocab = logits_shape[2] as usize;
+            let logits_offset = last_pos * vocab;
+            let logits_slice = &logits_data[logits_offset..logits_offset + vocab];
+            sample(logits_slice, &seen_tokens, params, &mut rng)
+        };
 
         // Extract hidden state for the last token position
         let (hidden_shape, hidden_data) = outputs[hidden_idx]
@@ -191,42 +202,21 @@ pub(crate) fn generate_cancellable(
         let hidden_offset = hidden_last_pos * hidden_dim;
         let hidden_vec: Vec<f32> = hidden_data[hidden_offset..hidden_offset + hidden_dim].to_vec();
 
-        // Update KV cache from present.{i}.key/value outputs
-        for i in 0..NUM_LAYERS {
-            let k_name = format!("present.{}.key", i);
-            let v_name = format!("present.{}.value", i);
-            let k_out_idx = output_names
-                .iter()
-                .position(|n| n == &k_name)
-                .ok_or_else(|| format!("{} not found in outputs", k_name))?;
-            let v_out_idx = output_names
-                .iter()
-                .position(|n| n == &v_name)
-                .ok_or_else(|| format!("{} not found in outputs", v_name))?;
-
-            // Extract data and recreate tensors (we can't move from SessionOutputs)
-            let (k_shape, k_data) = outputs[k_out_idx]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("extract {}: {}", k_name, e))?;
-            let (v_shape, v_data) = outputs[v_out_idx]
-                .try_extract_tensor::<f32>()
-                .map_err(|e| format!("extract {}: {}", v_name, e))?;
-
-            let k_shape_vec: Vec<usize> = k_shape.iter().map(|&d| d as usize).collect();
-            let v_shape_vec: Vec<usize> = v_shape.iter().map(|&d| d as usize).collect();
-
-            kv_cache[i * 2] = Tensor::from_array((k_shape_vec, k_data.to_vec().into_boxed_slice()))
-                .map_err(|e| format!("recreate {}: {}", k_name, e))?
-                .into_dyn();
-            kv_cache[i * 2 + 1] =
-                Tensor::from_array((v_shape_vec, v_data.to_vec().into_boxed_slice()))
-                    .map_err(|e| format!("recreate {}: {}", v_name, e))?
-                    .into_dyn();
+        // Update KV cache by moving the owned present.{i}.key/value outputs
+        // out of `outputs` — no copy of the (growing) cache per step.
+        for (i, names) in kv_names.iter().enumerate() {
+            kv_cache[i * 2] = Some(
+                outputs
+                    .remove(&names[2])
+                    .ok_or_else(|| format!("{} not found in outputs", names[2]))?,
+            );
+            kv_cache[i * 2 + 1] = Some(
+                outputs
+                    .remove(&names[3])
+                    .ok_or_else(|| format!("{} not found in outputs", names[3]))?,
+            );
         }
-
-        // Sample next token
-        let next_token = sample(logits_slice, &seen_tokens, params, &mut rng);
-        let finished = next_token == 3; // [STOP]
+        let finished = next_token == TOKEN_STOP;
 
         // Match Python logic exactly:
         // Python checks EOS first, then collects hidden state if not EOS

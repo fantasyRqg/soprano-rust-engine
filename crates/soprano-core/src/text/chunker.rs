@@ -4,10 +4,10 @@ const TARGET_CHUNK_CHARS: usize = 140;
 const MIN_CHUNK_CHARS: usize = 12;
 const MAX_MERGED_CHUNK_CHARS: usize = 220;
 
-const ABBREVIATIONS: &[&str] = &[
-    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "st.", "vs.", "etc.", "e.g.", "i.e.",
-    "u.s.", "u.k.",
-];
+// Only abbreviations that survive normalization matter here: the normalizer
+// expands mr./dr./st./etc. to words and rewrites dotted initials (e.g., u.s.)
+// via its letter-dot-letter rule before the chunker ever sees the text.
+const ABBREVIATIONS: &[&str] = &["prof.", "sr.", "vs."];
 
 fn wrap_chunk(chunk: &str) -> String {
     format!("{PREFIX}{chunk}{SUFFIX}")
@@ -142,10 +142,12 @@ mod tests {
 
     #[test]
     fn does_not_split_common_abbreviations() {
-        let normalized = "[STOP][TEXT]dr. smith arrived. he spoke next.[START]";
+        // prof. survives normalization (unlike dr./mr., which the normalizer
+        // expands), so the chunker must not treat its dot as a sentence end.
+        let normalized = "[STOP][TEXT]prof. smith arrived. he spoke next.[START]";
         let chunks = chunk_normalized(normalized);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], "[STOP][TEXT]dr. smith arrived.[START]");
+        assert_eq!(chunks[0], "[STOP][TEXT]prof. smith arrived.[START]");
         assert_eq!(chunks[1], "[STOP][TEXT]he spoke next.[START]");
     }
 

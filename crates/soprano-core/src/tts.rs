@@ -1,7 +1,7 @@
 //! Public API for the Soprano TTS engine.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
@@ -70,28 +70,20 @@ pub struct EstimateResult {
     pub duration_ms: u64,
 }
 
+/// Errors returned synchronously from the public API. Synthesis failures
+/// (tokenization, length limits, inference, hallucination) happen on the
+/// worker thread and are delivered through `AudioSink::on_error` instead.
 #[derive(Debug, Error)]
 pub enum SopranoError {
     #[error("model loading failed: {0}")]
     ModelLoadError(String),
-    #[error("input too long: {token_count} tokens exceeds max {max_tokens}")]
-    InputTooLong {
-        token_count: usize,
-        max_tokens: usize,
-    },
-    #[error("no sink attached — call set_sink() before feed()")]
-    NoSink,
     #[error("inference error: {0}")]
     InferenceError(String),
-    #[error("hallucination detected")]
-    Hallucination,
-    #[error("tokenization error: {0}")]
-    TokenizationError(String),
 }
 
 /// Internal message for the worker thread.
 enum WorkerMsg {
-    Feed { text: String, tag: u64 },
+    Feed { text: String, tag: u64, epoch: u64 },
     Flush,
     Drain { done_tx: mpsc::Sender<()> },
     UpdateParams(SamplingParams),
@@ -102,8 +94,11 @@ enum WorkerMsg {
 pub struct SopranoTTS {
     worker_tx: mpsc::Sender<WorkerMsg>,
     worker_handle: Option<thread::JoinHandle<()>>,
-    cancel_flag: Arc<AtomicBool>,
-    sampling_params: SamplingParams,
+    /// Monotonic stream generation. Each feed is stamped with the epoch at
+    /// submission time; `flush()` bumps it. The worker skips feeds from older
+    /// epochs and cancels in-flight synthesis when the epoch moves, so feeds
+    /// submitted *after* a flush are never discarded by it.
+    epoch: Arc<AtomicU64>,
 }
 
 impl SopranoTTS {
@@ -133,9 +128,8 @@ impl SopranoTTS {
         };
 
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
-        let initial_params = sampling_params.clone();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let worker_cancel_flag = Arc::clone(&cancel_flag);
+        let epoch = Arc::new(AtomicU64::new(0));
+        let worker_epoch = Arc::clone(&epoch);
 
         let handle = thread::spawn(move || {
             worker_loop(
@@ -144,24 +138,27 @@ impl SopranoTTS {
                 &mut backbone_session,
                 &mut decoder_session,
                 sink,
-                initial_params,
-                worker_cancel_flag,
+                sampling_params,
+                worker_epoch,
             );
         });
 
         Ok(Self {
             worker_tx: tx,
             worker_handle: Some(handle),
-            cancel_flag,
-            sampling_params,
+            epoch,
         })
     }
 
-    /// Estimate worst-case upper bound for output size.
+    /// Estimate a worst-case upper bound for output size.
+    ///
+    /// Text is normalized and chunked exactly like `feed` does, and each chunk
+    /// can generate up to `MAX_NEW_TOKENS` regardless of its character count,
+    /// so the bound is per-chunk, not per-text.
     pub fn estimate(&self, text: &str) -> EstimateResult {
-        // Heuristic: ~1 token per 3-4 chars, max 512 tokens, 2048 samples per token
-        let estimated_tokens = (text.len() / 3).min(MAX_NEW_TOKENS);
-        let pcm_samples = estimated_tokens * SAMPLES_PER_TOKEN;
+        let normalized = normalizer::normalize(text);
+        let num_chunks = chunker::chunk_normalized(&normalized).len().max(1);
+        let pcm_samples = num_chunks * MAX_NEW_TOKENS * SAMPLES_PER_TOKEN;
         let pcm_bytes = pcm_samples * 2;
         let duration_ms = (pcm_samples as u64 * 1000) / SAMPLE_RATE as u64;
         EstimateResult {
@@ -185,16 +182,18 @@ impl SopranoTTS {
             .send(WorkerMsg::Feed {
                 text: text.to_string(),
                 tag,
+                epoch: self.epoch.load(Ordering::SeqCst),
             })
             .map_err(|_| SopranoError::InferenceError("worker thread died".to_string()))
     }
 
-    /// Request cancellation of current inference and discard queued sentences.
+    /// Request cancellation of current inference and discard sentences queued
+    /// before this call. Feeds submitted after `flush()` returns are kept.
     ///
     /// Cancellation is checked between ONNX calls and decoder writes. If a sink
     /// blocks inside `write()`, cancellation takes effect after that call returns.
     pub fn flush(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         let _ = self.worker_tx.send(WorkerMsg::Flush);
     }
 
@@ -208,28 +207,23 @@ impl SopranoTTS {
     }
 
     /// Update inference parameters (takes effect on next sentence).
-    pub fn set_params(
-        &mut self,
-        temperature: f32,
-        top_k: usize,
-        top_p: f32,
-        repetition_penalty: f32,
-    ) {
-        self.sampling_params = SamplingParams {
+    pub fn set_params(&self, temperature: f32, top_k: usize, top_p: f32, repetition_penalty: f32) {
+        let _ = self.worker_tx.send(WorkerMsg::UpdateParams(SamplingParams {
             temperature,
             top_k,
             top_p,
             repetition_penalty,
-        };
-        let _ = self
-            .worker_tx
-            .send(WorkerMsg::UpdateParams(self.sampling_params.clone()));
+        }));
     }
 }
 
+/// Joins the worker thread. In-flight synthesis is cancelled at its next
+/// check, but a sink currently blocked inside `write()` must return before
+/// the join can complete — see the `AudioSink::write` contract.
 impl Drop for SopranoTTS {
     fn drop(&mut self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
+        // Bump the epoch so in-flight synthesis cancels at its next check.
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         let _ = self.worker_tx.send(WorkerMsg::Shutdown);
         if let Some(handle) = self.worker_handle.take() {
             let _ = handle.join();
@@ -245,23 +239,29 @@ fn worker_loop(
     decoder: &mut Session,
     mut sink: Box<dyn AudioSink>,
     mut params: SamplingParams,
-    cancel_flag: Arc<AtomicBool>,
+    epoch: Arc<AtomicU64>,
 ) {
     let mut total_samples_written: u64 = 0;
 
     loop {
         match rx.recv() {
-            Ok(WorkerMsg::Feed { text, tag }) => {
-                if cancel_flag.load(Ordering::SeqCst) {
+            Ok(WorkerMsg::Feed {
+                text,
+                tag,
+                epoch: feed_epoch,
+            }) => {
+                // Stale feed: a flush happened after it was queued.
+                if feed_epoch != epoch.load(Ordering::SeqCst) {
                     continue;
                 }
+                let is_cancelled = || feed_epoch != epoch.load(Ordering::SeqCst);
 
                 // Normalize text
                 let normalized = normalizer::normalize(&text);
                 let chunks = chunker::chunk_normalized(&normalized);
 
                 if chunks.is_empty() {
-                    sink.on_error("normalized input was empty".to_string());
+                    sink.on_error(tag, "normalized input was empty".to_string());
                     continue;
                 }
 
@@ -271,52 +271,59 @@ fn worker_loop(
 
                 let mut cancelled = false;
                 for chunk in chunks {
-                    if cancel_flag.load(Ordering::SeqCst) {
+                    if is_cancelled() {
                         cancelled = true;
                         break;
                     }
 
-                    // Tokenize
+                    // Tokenize. Any chunk error aborts the rest of the feed:
+                    // synthesizing later chunks would play audio with an
+                    // unannounced gap in the middle of the utterance.
                     let token_ids = match tokenizer.encode(&chunk) {
                         Ok(ids) => ids,
                         Err(e) => {
-                            sink.on_error(format!("tokenization error: {}", e));
-                            continue;
+                            sink.on_error(tag, format!("tokenization error: {}", e));
+                            break;
                         }
                     };
 
                     // Check length limit
                     if token_ids.len() > MAX_TOKENS {
-                        sink.on_error(format!(
-                            "input too long: {} tokens exceeds max {}",
-                            token_ids.len(),
-                            MAX_TOKENS
-                        ));
-                        continue;
+                        sink.on_error(
+                            tag,
+                            format!(
+                                "input too long: {} tokens exceeds max {}",
+                                token_ids.len(),
+                                MAX_TOKENS
+                            ),
+                        );
+                        break;
                     }
 
                     // Convert to i64 for ONNX
                     let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
 
                     // Run backbone generation
-                    let backbone_output =
-                        match backbone::generate_cancellable(backbone, &input_ids, &params, || {
-                            cancel_flag.load(Ordering::SeqCst)
-                        }) {
-                            Ok(Some(out)) => out,
-                            Ok(None) => {
-                                cancelled = true;
-                                break;
-                            }
-                            Err(e) => {
-                                sink.on_error(format!("backbone error: {}", e));
-                                continue;
-                            }
-                        };
+                    let backbone_output = match backbone::generate_cancellable(
+                        backbone,
+                        &input_ids,
+                        &params,
+                        is_cancelled,
+                    ) {
+                        Ok(Some(out)) => out,
+                        Ok(None) => {
+                            cancelled = true;
+                            break;
+                        }
+                        Err(e) => {
+                            sink.on_error(tag, format!("backbone error: {}", e));
+                            break;
+                        }
+                    };
 
                     if backbone_output.hallucinated {
-                        sink.on_error("hallucination detected".to_string());
-                        continue;
+                        sink.on_error(tag, "hallucination detected".to_string());
+                        break;
                     }
 
                     // Run decoder with streaming
@@ -325,7 +332,7 @@ fn worker_loop(
                             decoder,
                             &backbone_output.hidden_states,
                             &mut *sink,
-                            || cancel_flag.load(Ordering::SeqCst),
+                            is_cancelled,
                         ) {
                             Ok(Some(n)) => {
                                 total_samples_written += n as u64;
@@ -335,7 +342,8 @@ fn worker_loop(
                                 break;
                             }
                             Err(e) => {
-                                sink.on_error(format!("decoder error: {}", e));
+                                sink.on_error(tag, format!("decoder error: {}", e));
+                                break;
                             }
                         }
                     }
@@ -346,22 +354,9 @@ fn worker_loop(
                 }
             }
             Ok(WorkerMsg::Flush) => {
-                // Drain remaining messages from the channel
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        WorkerMsg::Shutdown => return,
-                        WorkerMsg::Drain { done_tx } => {
-                            let _ = done_tx.send(());
-                            sink.on_drain_complete();
-                        }
-                        WorkerMsg::UpdateParams(new_params) => {
-                            params = new_params;
-                        }
-                        WorkerMsg::Flush | WorkerMsg::Feed { .. } => {}
-                    }
-                }
+                // Stale feeds are skipped by the epoch check as they dequeue;
+                // the flush itself only resets the stream's sample offset.
                 total_samples_written = 0;
-                cancel_flag.store(false, Ordering::SeqCst);
             }
             Ok(WorkerMsg::Drain { done_tx }) => {
                 let _ = done_tx.send(());

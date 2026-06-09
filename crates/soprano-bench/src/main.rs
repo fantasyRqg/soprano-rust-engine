@@ -75,8 +75,8 @@ impl AudioSink for CountingSink {
     }
     fn on_sentence_start(&mut self, _: u64, _: u64) {}
     fn on_drain_complete(&mut self) {}
-    fn on_error(&mut self, error: String) {
-        eprintln!("  ERROR: {}", error);
+    fn on_error(&mut self, tag: u64, error: String) {
+        eprintln!("  ERROR (feed {}): {}", tag, error);
     }
 }
 

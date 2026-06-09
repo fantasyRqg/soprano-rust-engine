@@ -45,8 +45,9 @@ class TtsViewModel : ViewModel() {
                 sink?.release()
 
                 val newSink = AudioTrackSink(
-                    onSentence = { index ->
-                        _uiState.update { it.copy(status = "Sentence ${index + 1u} complete") }
+                    onStart = { tag, sampleOffset ->
+                        Log.d("SopranoTts", "Sentence ${tag + 1u} audio starts at sample $sampleOffset")
+                        _uiState.update { it.copy(status = "Speaking sentence ${tag + 1u}…") }
                     },
                     onComplete = {
                         _uiState.update { it.copy(isSpeaking = false, status = "Done") }
@@ -110,7 +111,12 @@ class TtsViewModel : ViewModel() {
         speakJob = viewModelScope.launch(Dispatchers.IO) {
             try {
                 feedStartNanos = System.nanoTime()
-                eng.feed(text)
+                // Feed each sentence as its own tagged segment. The tag is echoed
+                // back through onSentenceStart when that segment's audio begins,
+                // so the UI can report which sentence is currently playing.
+                splitIntoSentences(text).forEachIndexed { index, sentence ->
+                    eng.feed(sentence, index.toULong())
+                }
                 eng.drain()
                 val synthMs = (System.nanoTime() - feedStartNanos) / 1_000_000
 
@@ -148,6 +154,18 @@ class TtsViewModel : ViewModel() {
                 }
             }
         }
+    }
+
+    /** Split text into sentences on terminal punctuation, keeping the
+     *  delimiter and dropping empty fragments. Falls back to the whole string
+     *  if nothing splits, so a single feed always happens. */
+    private fun splitIntoSentences(text: String): List<String> {
+        val sentences = Regex("[^.!?]*[.!?]+|[^.!?]+\$")
+            .findAll(text)
+            .map { it.value.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        return sentences.ifEmpty { listOf(text) }
     }
 
     fun stop() {

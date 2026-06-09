@@ -5,10 +5,31 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    echo "Error: ANDROID_NDK_HOME is not set."
-    echo "Set it to your NDK installation, e.g.:"
-    echo "  export ANDROID_NDK_HOME=\$HOME/Library/Android/sdk/ndk/27.0.12077973"
-    exit 1
+    # Default to the newest NDK under the Android SDK. Honor ANDROID_HOME /
+    # ANDROID_SDK_ROOT if set, else fall back to the per-OS default location.
+    SDK_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+    if [ -z "$SDK_HOME" ]; then
+        case "$(uname -s)" in
+            Darwin) SDK_HOME="$HOME/Library/Android/sdk" ;;
+            *)      SDK_HOME="$HOME/Android/Sdk" ;;
+        esac
+    fi
+
+    if [ -d "$SDK_HOME/ndk" ]; then
+        # Pick the highest version directory (sorted -V handles e.g. 27 > 9).
+        ANDROID_NDK_HOME="$(find "$SDK_HOME/ndk" -mindepth 1 -maxdepth 1 -type d \
+            | sort -V | tail -n 1)"
+    fi
+
+    if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "${ANDROID_NDK_HOME:-}" ]; then
+        echo "Error: ANDROID_NDK_HOME is not set and no NDK was found under $SDK_HOME/ndk."
+        echo "Set it to your NDK installation, e.g.:"
+        echo "  export ANDROID_NDK_HOME=\$HOME/Library/Android/sdk/ndk/27.0.12077973"
+        exit 1
+    fi
+
+    export ANDROID_NDK_HOME
+    echo "ANDROID_NDK_HOME not set — defaulting to $ANDROID_NDK_HOME"
 fi
 
 command -v cargo-ndk >/dev/null 2>&1 || {

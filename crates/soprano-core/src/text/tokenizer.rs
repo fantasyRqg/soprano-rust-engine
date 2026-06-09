@@ -34,11 +34,6 @@ impl SopranoTokenizer {
             .map_err(|e| format!("tokenization failed: {}", e))?;
         Ok(encoding.get_ids().to_vec())
     }
-
-    /// Check if token IDs exceed the model's max sequence length.
-    pub fn exceeds_limit(&self, ids: &[u32]) -> bool {
-        ids.len() > MAX_TOKENS
-    }
 }
 
 #[cfg(test)]
@@ -76,16 +71,5 @@ mod tests {
         // Verify STOP=3 at start, START=2 at end
         assert_eq!(ids[0], TOKEN_STOP);
         assert_eq!(*ids.last().unwrap(), TOKEN_START);
-    }
-
-    #[test]
-    fn test_exceeds_limit() {
-        let ids = vec![0u32; 513];
-        assert!(SopranoTokenizer::exceeds_limit(
-            &SopranoTokenizer {
-                tokenizer: Tokenizer::from_file(test_tokenizer_path()).unwrap()
-            },
-            &ids
-        ));
     }
 }

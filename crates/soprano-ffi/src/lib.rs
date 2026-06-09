@@ -5,45 +5,27 @@
 //! PCM data as raw bytes (little-endian i16).
 
 use soprano_core::{AudioSink, SinkError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 uniffi::setup_scaffolding!();
 
 // ─── Error types ───────────────────────────────────────────────────────────
 
+/// Errors thrown synchronously from the API. Synthesis failures are delivered
+/// asynchronously through `FfiAudioSink::on_error`.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum FfiError {
     #[error("model loading failed: {msg}")]
     ModelLoadError { msg: String },
-    #[error("input too long: {token_count} tokens exceeds max {max_tokens}")]
-    InputTooLong { token_count: u32, max_tokens: u32 },
     #[error("inference error: {msg}")]
     InferenceError { msg: String },
-    #[error("hallucination detected")]
-    Hallucination,
-    #[error("tokenization error: {msg}")]
-    TokenizationError { msg: String },
 }
 
 impl From<soprano_core::SopranoError> for FfiError {
     fn from(e: soprano_core::SopranoError) -> Self {
         match e {
             soprano_core::SopranoError::ModelLoadError(msg) => FfiError::ModelLoadError { msg },
-            soprano_core::SopranoError::InputTooLong {
-                token_count,
-                max_tokens,
-            } => FfiError::InputTooLong {
-                token_count: token_count as u32,
-                max_tokens: max_tokens as u32,
-            },
-            soprano_core::SopranoError::NoSink => FfiError::InferenceError {
-                msg: "no sink attached".to_string(),
-            },
             soprano_core::SopranoError::InferenceError(msg) => FfiError::InferenceError { msg },
-            soprano_core::SopranoError::Hallucination => FfiError::Hallucination,
-            soprano_core::SopranoError::TokenizationError(msg) => {
-                FfiError::TokenizationError { msg }
-            }
         }
     }
 }
@@ -116,8 +98,9 @@ pub trait FfiAudioSink: Send + Sync {
     /// Called when all queued sentences are done.
     fn on_drain_complete(&self);
 
-    /// Called on inference error.
-    fn on_error(&self, message: String);
+    /// Called when a feed fails. `tag` is the value passed to `feed` for the
+    /// failed feed; the rest of that feed is aborted.
+    fn on_error(&self, tag: u64, message: String);
 }
 
 /// Adapter that bridges FfiAudioSink (callback interface) to core AudioSink trait.
@@ -133,7 +116,15 @@ impl AudioSink for SinkAdapter {
         if bytes_written < 0 {
             return Err(SinkError::Closed);
         }
-        // Convert bytes written back to samples
+        // An odd byte count means the sink consumed half a sample; retrying
+        // from the sample boundary would duplicate the stray byte and desync
+        // the stream, so treat it as a failed write.
+        if bytes_written % 2 != 0 {
+            return Err(SinkError::WriteFailed(format!(
+                "sink consumed a partial sample ({} bytes)",
+                bytes_written
+            )));
+        }
         Ok((bytes_written as usize) / 2)
     }
 
@@ -149,16 +140,20 @@ impl AudioSink for SinkAdapter {
         self.inner.on_drain_complete();
     }
 
-    fn on_error(&mut self, error: String) {
-        self.inner.on_error(error);
+    fn on_error(&mut self, tag: u64, error: String) {
+        self.inner.on_error(tag, error);
     }
 }
 
 // ─── Main engine object ────────────────────────────────────────────────────
 
+// No lock around the engine: all core methods take &self and are thread-safe.
+// In particular, flush() must never wait on drain() — drain() blocks at
+// playback rate, and a Stop button calling flush() behind a lock would hang
+// the UI until the utterance finished playing.
 #[derive(uniffi::Object)]
 pub struct SopranoTts {
-    inner: Mutex<soprano_core::SopranoTTS>,
+    inner: soprano_core::SopranoTTS,
 }
 
 #[uniffi::export]
@@ -179,15 +174,12 @@ impl SopranoTts {
         let engine = soprano_core::SopranoTTS::new(core_config, Box::new(adapter))
             .map_err(FfiError::from)?;
 
-        Ok(Arc::new(Self {
-            inner: Mutex::new(engine),
-        }))
+        Ok(Arc::new(Self { inner: engine }))
     }
 
     /// Estimate worst-case output size for a text.
     pub fn estimate(&self, text: String) -> EstimateResult {
-        let engine = self.inner.lock().unwrap();
-        let est = engine.estimate(&text);
+        let est = self.inner.estimate(&text);
         EstimateResult {
             pcm_samples: est.pcm_samples as u64,
             pcm_bytes: est.pcm_bytes as u64,
@@ -200,25 +192,24 @@ impl SopranoTts {
     /// `on_sentence_start` at the sample where this feed's audio begins.
     /// Synthesis errors are delivered asynchronously through `on_error`.
     pub fn feed(&self, text: String, tag: u64) -> Result<(), FfiError> {
-        let engine = self.inner.lock().unwrap();
-        engine.feed(&text, tag).map_err(FfiError::from)
+        self.inner.feed(&text, tag).map_err(FfiError::from)
     }
 
-    /// Request cancellation of current inference and discard queued sentences.
+    /// Request cancellation of current inference and discard sentences queued
+    /// before this call. Feeds submitted afterwards are kept. Safe to call
+    /// while another thread is blocked in `drain()`.
     pub fn flush(&self) {
-        let engine = self.inner.lock().unwrap();
-        engine.flush();
+        self.inner.flush();
     }
 
     /// Block until all queued sentences finish writing to sink.
     pub fn drain(&self) {
-        let engine = self.inner.lock().unwrap();
-        engine.drain();
+        self.inner.drain();
     }
 
     /// Update sampling parameters (takes effect on next sentence).
     pub fn set_params(&self, temperature: f32, top_k: u32, top_p: f32, repetition_penalty: f32) {
-        let mut engine = self.inner.lock().unwrap();
-        engine.set_params(temperature, top_k as usize, top_p, repetition_penalty);
+        self.inner
+            .set_params(temperature, top_k as usize, top_p, repetition_penalty);
     }
 }

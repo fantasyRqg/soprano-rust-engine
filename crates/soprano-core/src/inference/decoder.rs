@@ -29,9 +29,13 @@ fn write_f32_pcm(
         match sink.write(&i16_samples[written..]) {
             Ok(0) => return Err("sink write made no progress".to_string()),
             Ok(n) => written += n,
+            // A closed sink aborts the feed like a cancellation: keep the
+            // partial count but stop decoding — running inference against a
+            // dead sink wastes work and lets sample offsets drift from what
+            // the sink actually received.
             Err(SinkError::Closed) => {
                 *total_samples_written += written;
-                return Ok(true);
+                return Ok(false);
             }
             Err(e) => return Err(format!("sink write error: {}", e)),
         }

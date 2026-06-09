@@ -66,9 +66,10 @@ final class TtsViewModel {
                 let modelPath = Bundle.main.resourcePath! + "/Models"
 
                 let newSink = AudioEngineSink(
-                    onSentence: { index in
+                    onStart: { tag, sampleOffset in
+                        logger.info("Sentence \(tag + 1) audio starts at sample \(sampleOffset)")
                         Task { @MainActor in
-                            self.status = "Sentence \(index + 1) complete"
+                            self.status = "Speaking sentence \(tag + 1)…"
                         }
                     },
                     onComplete: {
@@ -139,7 +140,12 @@ final class TtsViewModel {
             do {
                 self._timing.feedStartNanos = DispatchTime.now().uptimeNanoseconds
                 let feedStart = DispatchTime.now().uptimeNanoseconds
-                try engine.feed(text: text)
+                // Feed each sentence as its own tagged segment. The tag is echoed
+                // back through onSentenceStart when that segment's audio begins,
+                // so the UI can report which sentence is currently playing.
+                for (index, sentence) in Self.splitIntoSentences(text).enumerated() {
+                    try engine.feed(text: sentence, tag: UInt64(index))
+                }
                 engine.drain()
                 let synthMs = (DispatchTime.now().uptimeNanoseconds - feedStart) / 1_000_000
 
@@ -182,6 +188,26 @@ final class TtsViewModel {
                 }
             }
         }
+    }
+
+    /// Split text into sentences on terminal punctuation, keeping the
+    /// delimiter and dropping empty fragments. `nonisolated` so it can run on
+    /// the detached synthesis task. Falls back to the whole string if nothing
+    /// splits, so a single feed always happens.
+    nonisolated private static func splitIntoSentences(_ text: String) -> [String] {
+        var sentences: [String] = []
+        var current = ""
+        for ch in text {
+            current.append(ch)
+            if ch == "." || ch == "!" || ch == "?" {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { sentences.append(trimmed) }
+                current = ""
+            }
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { sentences.append(tail) }
+        return sentences.isEmpty ? [text] : sentences
     }
 
     func stop() {

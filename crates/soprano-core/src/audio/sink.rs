@@ -14,6 +14,12 @@ pub trait AudioSink: Send {
     /// Write PCM i16 samples into the sink.
     /// MUST block if buffer is full (provides backpressure) or return an error.
     /// Returning `Ok(0)` for non-empty input is treated as a write failure.
+    ///
+    /// A blocked `write` MUST eventually return (e.g. by returning
+    /// `Err(SinkError::Closed)` when playback stops for good). Cancellation
+    /// and engine shutdown are only checked between calls, so a `write` that
+    /// never returns hangs `flush` semantics and blocks `SopranoTTS`'s `Drop`
+    /// (which joins the worker thread) forever.
     fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError>;
 
     /// Available space in samples (not bytes). This is advisory; the engine
@@ -30,6 +36,8 @@ pub trait AudioSink: Send {
     /// Called when all queued sentences are done.
     fn on_drain_complete(&mut self);
 
-    /// Called on error during inference.
-    fn on_error(&mut self, error: String);
+    /// Called when a feed fails during normalization, tokenization, inference,
+    /// or decoding. `tag` is the value passed to `feed` for the failed feed.
+    /// The rest of that feed is aborted — no further audio for it follows.
+    fn on_error(&mut self, tag: u64, error: String);
 }

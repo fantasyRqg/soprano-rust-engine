@@ -79,8 +79,8 @@ impl AudioSink for WavSink {
 
     fn on_sentence_start(&mut self, _tag: u64, _sample_offset: u64) {}
     fn on_drain_complete(&mut self) {}
-    fn on_error(&mut self, error: String) {
-        eprintln!("Error: {}", error);
+    fn on_error(&mut self, tag: u64, error: String) {
+        eprintln!("Error (feed {}): {}", tag, error);
     }
 }
 

@@ -24,4 +24,5 @@ name = "uniffi-bindgen"
 path = "src/uniffi-bindgen.rs"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# rlib so integration tests in tests/ can link against the crate
+crate-type = ["cdylib", "staticlib", "rlib"]

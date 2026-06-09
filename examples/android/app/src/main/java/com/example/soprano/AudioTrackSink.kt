@@ -6,7 +6,7 @@ import android.media.AudioTrack
 import uniffi.soprano_ffi.FfiAudioSink
 
 class AudioTrackSink(
-    private val onSentence: (UInt) -> Unit,
+    private val onStart: (tag: ULong, sampleOffset: ULong) -> Unit,
     private val onComplete: () -> Unit,
     private val onErr: (String) -> Unit,
     private val onFirstByte: () -> Unit,
@@ -72,16 +72,16 @@ class AudioTrackSink(
         return bufferSizeBytes.toULong()
     }
 
-    override fun onSentenceComplete(sentenceIndex: UInt) {
-        onSentence(sentenceIndex)
+    override fun onSentenceStart(tag: ULong, sampleOffset: ULong) {
+        onStart(tag, sampleOffset)
     }
 
     override fun onDrainComplete() {
         onComplete()
     }
 
-    override fun onError(message: String) {
-        onErr(message)
+    override fun onError(tag: ULong, message: String) {
+        onErr("feed $tag: $message")
     }
 
     fun release() {

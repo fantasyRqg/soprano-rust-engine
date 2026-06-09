@@ -222,7 +222,7 @@ macro_rules! lazy_regex {
     ($pat:expr) => {
         LazyLock::new(|| Regex::new($pat).unwrap())
     };
-    ($pat:expr, $flags:expr) => {
+    ($pat:expr, i) => {
         LazyLock::new(|| {
             regex::RegexBuilder::new($pat)
                 .case_insensitive(true)
@@ -233,7 +233,7 @@ macro_rules! lazy_regex {
 }
 
 static NUM_PREFIX_RE: LazyLock<Regex> = lazy_regex!(r"#\d");
-static NUM_SUFFIX_RE: LazyLock<Regex> = lazy_regex!(r"\b\d+(K|M|B|T)\b", "i");
+static NUM_SUFFIX_RE: LazyLock<Regex> = lazy_regex!(r"\b\d+(K|M|B|T)\b", i);
 static NUM_LETTER_SPLIT_RE: LazyLock<Regex> = lazy_regex!(r"(\d[a-zA-Z]|[a-zA-Z]\d)");
 static COMMA_NUMBER_RE: LazyLock<Regex> = lazy_regex!(r"(\d[\d,]+\d)");
 static DATE_RE: LazyLock<Regex> =
@@ -625,6 +625,9 @@ fn normalize_numbers(text: &str) -> String {
                 return format!("{} dollars", m);
             }
             let dollars: i64 = parts[0].replace(',', "").parse().unwrap_or(0);
+            // Parity quirk inherited from the Python normalizer (int(parts[1])):
+            // "$1.5" reads as "1 dollar, 5 cents", not 50. The model was trained
+            // on Python-normalized text, so we match it rather than fix it here.
             let cents: i64 = if parts.len() > 1 && !parts[1].is_empty() {
                 parts[1].parse().unwrap_or(0)
             } else {

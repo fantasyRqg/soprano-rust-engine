@@ -9,7 +9,9 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
 
     private let maxScheduledBuffers = 8
     private let semaphore = DispatchSemaphore(value: 8)
-    private let bufferSizePerChunk = 16_000  // 16KB per chunk, 8 slots = ~128KB total
+    // The engine writes one decode window at a time: 8 frames x 2048 samples
+    // x 2 bytes = 32KB. 8 slots = ~256KB of scheduled audio.
+    private let bufferSizePerChunk = 32_768
 
     // All mutable counters protected by this lock.
     // Accessed from: Rust callback thread (writePcm), AVAudioEngine completion queue,
@@ -21,8 +23,13 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
     private var _totalBlockedNanos: Int64 = 0
     private var _buffersScheduled: Int = 0
     private var _buffersConsumed: Int = 0
+    // Bumped by resetForNewSynthesis. Completion handlers of buffers from an
+    // older generation must not signal the semaphore or touch counters: the
+    // reset already restored all permits, so a late signal would push the
+    // permit count above maxScheduledBuffers and quietly loosen backpressure.
+    private var _generation: UInt64 = 0
 
-    private let onSentence: (UInt32) -> Void
+    private let onStart: (_ tag: UInt64, _ sampleOffset: UInt64) -> Void
     private let onComplete: () -> Void
     private let onErr: (String) -> Void
     private let onFirstByte: () -> Void
@@ -34,12 +41,12 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
     var pendingBytes: Int64 { lock.withLock { _totalBytesWritten - _bytesConsumed } }
 
     init(
-        onSentence: @escaping (UInt32) -> Void,
+        onStart: @escaping (_ tag: UInt64, _ sampleOffset: UInt64) -> Void,
         onComplete: @escaping () -> Void,
         onErr: @escaping (String) -> Void,
         onFirstByte: @escaping () -> Void
     ) {
-        self.onSentence = onSentence
+        self.onStart = onStart
         self.onComplete = onComplete
         self.onErr = onErr
         self.onFirstByte = onFirstByte
@@ -99,13 +106,17 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
         let waitElapsed = DispatchTime.now().uptimeNanoseconds - waitStart
 
         let chunkBytes = Int64(pcmData.count)
+        let generation = lock.withLock { _generation }
         playerNode.scheduleBuffer(buffer) { [weak self] in
             guard let self else { return }
+            // Signal inside the lock so a reset can't interleave between the
+            // generation check and the signal.
             self.lock.withLock {
+                guard self._generation == generation else { return }
                 self._buffersConsumed += 1
                 self._bytesConsumed += chunkBytes
+                self.semaphore.signal()
             }
-            self.semaphore.signal()
         }
 
         lock.withLock {
@@ -124,29 +135,26 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
         return UInt64(freeSlots * bufferSizePerChunk)
     }
 
-    func onSentenceComplete(sentenceIndex: UInt32) {
-        onSentence(sentenceIndex)
+    func onSentenceStart(tag: UInt64, sampleOffset: UInt64) {
+        onStart(tag, sampleOffset)
     }
 
     func onDrainComplete() {
         onComplete()
     }
 
-    func onError(message: String) {
-        onErr(message)
+    func onError(tag: UInt64, message: String) {
+        onErr("feed \(tag): \(message)")
     }
 
-    /// Reset counters for a new synthesis. Stops the player node first to drain
-    /// any pending buffers, then restarts it — prevents stale completion handlers
-    /// from corrupting counters.
+    /// Reset counters for a new synthesis. Bumping the generation first makes
+    /// completion handlers of in-flight buffers no-ops: any handler that
+    /// signalled before the bump did so under the lock, so its permit is
+    /// already visible to the drain below; any handler after the bump sees a
+    /// stale generation and stays silent.
     func resetForNewSynthesis() {
-        playerNode.stop()
-        // Drain any semaphore permits held by now-cancelled buffers
-        while case .success = semaphore.wait(timeout: .now()) {}
-        // Restore all permits
-        for _ in 0..<maxScheduledBuffers { semaphore.signal() }
-
         lock.withLock {
+            _generation &+= 1
             _firstByteReceived = false
             _totalBytesWritten = 0
             _bytesConsumed = 0
@@ -154,6 +162,10 @@ final class AudioEngineSink: FfiAudioSink, @unchecked Sendable {
             _buffersScheduled = 0
             _buffersConsumed = 0
         }
+        playerNode.stop()
+        // Drain whatever permits exist, then restore exactly maxScheduledBuffers.
+        while case .success = semaphore.wait(timeout: .now()) {}
+        for _ in 0..<maxScheduledBuffers { semaphore.signal() }
         playerNode.play()
     }
 

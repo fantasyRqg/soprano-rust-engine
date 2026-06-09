@@ -171,13 +171,14 @@ let config = SopranoConfig {
     execution_provider: ExecutionProvider::Cpu,
 };
 
-let mut tts = SopranoTTS::new(config, Box::new(my_sink))?;
-tts.feed("Hello, world!")?;
+let tts = SopranoTTS::new(config, Box::new(my_sink))?;
+tts.feed("Hello, world!", 0)?; // tag echoed back via on_sentence_start
 tts.drain(); // blocks until synthesis completes
 ```
 
 `feed()` queues work and returns immediately. Runtime synthesis errors are
-reported through `AudioSink::on_error`.
+reported through `AudioSink::on_error` with the failed feed's tag; the rest
+of that feed is aborted.
 
 The `AudioSink` trait lets you provide your own audio output:
 
@@ -185,9 +186,9 @@ The `AudioSink` trait lets you provide your own audio output:
 pub trait AudioSink: Send {
     fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError>;
     fn available(&self) -> usize;
-    fn on_sentence_complete(&mut self, sentence_index: usize);
+    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64);
     fn on_drain_complete(&mut self);
-    fn on_error(&mut self, error: String);
+    fn on_error(&mut self, tag: u64, error: String);
 }
 ```
 
