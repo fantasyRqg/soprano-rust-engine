@@ -123,7 +123,7 @@ Or open `examples/android/` in Android Studio and Run.
 ### 3. Push model files to the device
 
 ```bash
-adb push ../../models/ /sdcard/Android/data/com.example.soprano/files/soprano-models/
+adb push ../../models/ /data/local/tmp/soprano_model/
 ```
 
 ### 4. Run

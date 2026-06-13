@@ -48,5 +48,5 @@ echo "  adb shell \"LD_LIBRARY_PATH=$DEVICE_DIR $DEVICE_DIR/soprano-bench --mode
 echo ""
 echo "Example comparing all EPs:"
 echo "  for ep in cpu nnapi xnnpack; do"
-echo "    adb shell \"LD_LIBRARY_PATH=$DEVICE_DIR $DEVICE_DIR/soprano-bench --model /sdcard/soprano-models --ep \$ep -n 3\""
+echo "    adb shell \"LD_LIBRARY_PATH=$DEVICE_DIR $DEVICE_DIR/soprano-bench --model /data/local/tmp/soprano_model --ep \$ep -n 3\""
 echo "  done"

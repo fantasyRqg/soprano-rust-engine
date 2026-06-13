@@ -36,7 +36,7 @@ Open `examples/android/` in Android Studio and build, or:
 ### 3. Push model files to device
 
 ```bash
-adb push ../../models/ /sdcard/Android/data/com.example.soprano/files/soprano-models/
+adb push ../../models/ /data/local/tmp/soprano_model/
 ```
 
 ### 4. Install and run
@@ -58,21 +58,13 @@ export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/<version>
 ../../scripts/build-bench-android.sh
 ```
 
-### Copy models (if not already accessible)
-
-```bash
-adb shell mkdir -p /data/local/tmp/soprano-models
-for f in soprano_backbone_kv_f16.onnx soprano_decoder_f16.onnx tokenizer.json; do
-  adb shell "run-as com.example.soprano cat files/soprano-models/$f" > /tmp/$f
-  adb push /tmp/$f /data/local/tmp/soprano-models/
-done
-```
-
 ### Run
+
+Models pushed for the app (step 3 above) are already accessible at `/data/local/tmp/soprano_model`.
 
 ```bash
 DIR=/data/local/tmp/soprano-bench
-MODELS=/data/local/tmp/soprano-models
+MODELS=/data/local/tmp/soprano_model
 adb shell "LD_LIBRARY_PATH=$DIR $DIR/soprano-bench --model $MODELS --ep cpu -n 3"
 ```
 

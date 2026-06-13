@@ -34,7 +34,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val defaultModelPath = filesDir.resolve("soprano-models").absolutePath
+        val defaultModelPath = "/data/local/tmp/soprano_model"
 
         setContent {
             MaterialTheme {
