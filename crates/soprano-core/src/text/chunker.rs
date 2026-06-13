@@ -25,12 +25,32 @@ fn ends_with_abbreviation(text: &str) -> bool {
     ABBREVIATIONS.iter().any(|abbr| trimmed.ends_with(abbr))
 }
 
+/// True when `text` ends with a single-letter initial followed by a period,
+/// e.g. "misess j." or "... h." Here the dot abbreviates an initial, not a
+/// sentence end, so the chunker must not break a name such as the normalized
+/// form of "Mrs. J. H. Riddell" between its initials and surname.
+fn ends_with_initial(text: &str) -> bool {
+    let Some(before_dot) = text.trim_end().strip_suffix('.') else {
+        return false;
+    };
+    let mut rev = before_dot.chars().rev();
+    match rev.next() {
+        // The letter must stand alone: preceded by whitespace or nothing,
+        // so "h." counts but "riddell." does not.
+        Some(c) if c.is_ascii_alphabetic() => match rev.next() {
+            None => true,
+            Some(prev) => prev.is_whitespace(),
+        },
+        _ => false,
+    }
+}
+
 fn should_split_on_soft_boundary(current: &str) -> bool {
     current.trim().len() >= TARGET_CHUNK_CHARS
 }
 
 fn should_split_on_strong_boundary(current: &str) -> bool {
-    !ends_with_abbreviation(current)
+    !ends_with_abbreviation(current) && !ends_with_initial(current)
 }
 
 fn push_chunk(chunks: &mut Vec<String>, current: &mut String) {
@@ -149,6 +169,48 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "[STOP][TEXT]prof. smith arrived.[START]");
         assert_eq!(chunks[1], "[STOP][TEXT]he spoke next.[START]");
+    }
+
+    #[test]
+    fn keeps_initials_with_following_surname() {
+        // Normalized form of "Mrs. J. H. Riddell wrote ..." — the single-letter
+        // initials must not split the name away from the surname.
+        let normalized =
+            "[STOP][TEXT]misess j. h. riddell wrote many celebrated ghost stories.[START]";
+        let chunks = chunk_normalized(normalized);
+        assert_eq!(
+            chunks,
+            vec!["[STOP][TEXT]misess j. h. riddell wrote many celebrated ghost stories.[START]"]
+        );
+    }
+
+    #[test]
+    fn initials_still_split_at_real_sentence_end() {
+        // A surname-terminating period is still a strong boundary.
+        let normalized =
+            "[STOP][TEXT]misess j. h. riddell wrote ghost stories. he admired her work greatly and often.[START]";
+        let chunks = chunk_normalized(normalized);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0],
+            "[STOP][TEXT]misess j. h. riddell wrote ghost stories.[START]"
+        );
+        assert_eq!(
+            chunks[1],
+            "[STOP][TEXT]he admired her work greatly and often.[START]"
+        );
+    }
+
+    #[test]
+    fn keeps_normalized_url_intact() {
+        // Normalized form of "... visit https://www.pgdp.net and read ..." — the
+        // spelled-out URL contains no terminal punctuation and must stay whole.
+        let normalized = "[STOP][TEXT]please visit h t t p s colon slash slash ww dot pgdp dot net and read the guidelines.[START]";
+        let chunks = chunk_normalized(normalized);
+        assert_eq!(
+            chunks,
+            vec!["[STOP][TEXT]please visit h t t p s colon slash slash ww dot pgdp dot net and read the guidelines.[START]"]
+        );
     }
 
     #[test]

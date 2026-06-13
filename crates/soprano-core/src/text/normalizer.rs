@@ -254,6 +254,10 @@ static NUMBER_RE: LazyLock<Regex> = lazy_regex!(r"\d+");
 static LINK_HEADER_RE: LazyLock<Regex> = lazy_regex!(r"(https?://)");
 static DASH_RE: LazyLock<Regex> = lazy_regex!(r"(. - .)");
 static DOT_RE: LazyLock<Regex> = lazy_regex!(r"([A-Za-z]\.[A-Za-z])");
+// A single capital letter followed by a dot and whitespace is an initial
+// (e.g. "J. H." in "Mrs. J. H. Riddell"); drop the dot so the model reads the
+// initials as a flowing name rather than a string of sentence-ending pauses.
+static INITIALS_RE: LazyLock<Regex> = lazy_regex!(r"\b([A-Z])\.(\s)");
 static PARENTHESES_RE: LazyLock<Regex> = lazy_regex!(r"[\(\[\{].*[\)\]\}](.|$)");
 static CAMELCASE_RE: LazyLock<Regex> = lazy_regex!(r"\b[A-Z][a-z]*(?:[A-Z][a-z]*)+\b");
 
@@ -787,6 +791,9 @@ fn normalize_special(text: &str) -> String {
         })
         .to_string();
 
+    // Spaced initials: "J. H." → "J H" (drop the dot; keep the letter and space)
+    text = INITIALS_RE.replace_all(&text, "$1$2").to_string();
+
     // Parentheses
     text = PARENTHESES_RE
         .replace_all(&text, |caps: &regex::Captures| {
@@ -1084,6 +1091,17 @@ mod tests {
     #[test]
     fn test_initials() {
         assert_eq!(clean_text("U.S.A."), "u dot s.a.");
+    }
+
+    #[test]
+    fn test_name_initials_drop_dot() {
+        // Spaced initials lose their dots so the name flows; the surname's
+        // sentence-ending period is kept.
+        assert_eq!(
+            clean_text("Mrs. J. H. Riddell"),
+            "misess j h riddell."
+        );
+        assert_eq!(clean_text("J. R. R. Tolkien"), "j r r tolkien.");
     }
 
     #[test]
