@@ -3,8 +3,8 @@
 //! decoding the whole sequence at once with `decode_all`.
 
 use soprano_core::audio::convert::f32_to_i16;
-use soprano_core::inference::decoder::{decode_all, decode_streaming};
-use soprano_core::inference::session::{load_session, HIDDEN_DIM};
+use soprano_core::inference::decoder::{decode_all, decode_streaming, StreamingDecode};
+use soprano_core::inference::session::{load_session, HIDDEN_DIM, STREAM_HOLDBACK_FRAMES};
 use soprano_core::{AudioSink, ExecutionProvider, SinkError};
 
 struct Collector(Vec<i16>);
@@ -78,5 +78,66 @@ fn streaming_decode_matches_whole_decode() {
     assert!(
         max_diff <= 1,
         "streamed audio diverges from whole decode: max abs i16 diff = {max_diff}"
+    );
+}
+
+// Interleaved decoding (one hidden state pushed at a time, with a holdback
+// margin so hallucination runs never reach the sink) must, on a clean finish,
+// drain every buffered frame and reproduce the whole-decode audio exactly.
+#[test]
+fn interleaved_decode_with_holdback_matches_whole_decode() {
+    let Some(path) = decoder_path() else {
+        eprintln!("Skipping: decoder model not found");
+        return;
+    };
+    let mut session = load_session(&path, &ExecutionProvider::Cpu).expect("load decoder");
+
+    // Enough tokens to span the holdback margin plus several emitted windows.
+    let hidden = synth(STREAM_HOLDBACK_FRAMES + 40);
+
+    let whole: Vec<i16> = decode_all(&mut session, &hidden)
+        .expect("decode_all")
+        .iter()
+        .map(|&s| f32_to_i16(s))
+        .collect();
+
+    let mut sink = Collector(Vec::new());
+    let no_cancel = || false;
+    {
+        let mut stream = StreamingDecode::new(&mut session, STREAM_HOLDBACK_FRAMES);
+        for h in &hidden {
+            assert!(
+                stream
+                    .push(h, &mut sink, &no_cancel)
+                    .expect("push should not error"),
+                "push should not signal stop without cancellation"
+            );
+        }
+        assert!(
+            stream
+                .finish(&mut sink, &no_cancel)
+                .expect("finish should not error"),
+            "finish should not signal stop without cancellation"
+        );
+    }
+    let streamed = sink.0;
+
+    assert_eq!(
+        streamed.len(),
+        whole.len(),
+        "interleaved length {} != whole-decode length {}",
+        streamed.len(),
+        whole.len()
+    );
+
+    let max_diff = streamed
+        .iter()
+        .zip(&whole)
+        .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_diff <= 1,
+        "interleaved audio diverges from whole decode: max abs i16 diff = {max_diff}"
     );
 }

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Instant;
 
 use ort::session::Session;
 use thiserror::Error;
@@ -13,6 +14,7 @@ use crate::inference::backbone;
 use crate::inference::decoder;
 use crate::inference::sampler::SamplingParams;
 use crate::inference::session::*;
+use crate::profile::profile_log;
 use crate::text::chunker;
 use crate::text::normalizer;
 use crate::text::tokenizer::{SopranoTokenizer, MAX_TOKENS};
@@ -255,10 +257,17 @@ fn worker_loop(
                     continue;
                 }
                 let is_cancelled = || feed_epoch != epoch.load(Ordering::SeqCst);
+                let t_feed = Instant::now();
 
                 // Normalize text
                 let normalized = normalizer::normalize(&text);
                 let chunks = chunker::chunk_normalized(&normalized);
+                profile_log!(
+                    "feed tag={}: normalize+chunk {}ms, {} chunks",
+                    tag,
+                    t_feed.elapsed().as_millis(),
+                    chunks.len()
+                );
 
                 if chunks.is_empty() {
                     sink.on_error(tag, "normalized input was empty".to_string());
@@ -270,11 +279,17 @@ fn worker_loop(
                 sink.on_sentence_start(tag, total_samples_written);
 
                 let mut cancelled = false;
-                for chunk in chunks {
+                for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
                     if is_cancelled() {
                         cancelled = true;
                         break;
                     }
+                    profile_log!(
+                        "chunk {} start at +{}ms ({} chars)",
+                        chunk_idx,
+                        t_feed.elapsed().as_millis(),
+                        chunk.len()
+                    );
 
                     // Tokenize. Any chunk error aborts the rest of the feed:
                     // synthesizing later chunks would play audio with an
@@ -303,48 +318,83 @@ fn worker_loop(
                     // Convert to i64 for ONNX
                     let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
 
-                    // Run backbone generation
-                    let backbone_output = match backbone::generate_cancellable(
-                        backbone,
+                    // Interleave generation and decoding: each hidden state is
+                    // pushed into the streaming decoder as the backbone produces
+                    // it, so audio starts after roughly the holdback margin
+                    // instead of after the whole chunk is generated. The decoder
+                    // holds back STREAM_HOLDBACK_FRAMES so a hallucination run
+                    // (detected only after the fact) never reaches the sink.
+                    let mut stream =
+                        decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES);
+                    let mut first_audio_logged = false;
+                    let outcome = backbone::generate_streaming_cancellable(
+                        &mut *backbone,
                         &input_ids,
                         &params,
                         is_cancelled,
-                    ) {
-                        Ok(Some(out)) => out,
-                        Ok(None) => {
+                        |hidden| {
+                            let cont = stream.push(hidden, &mut *sink, &is_cancelled)?;
+                            if !first_audio_logged && stream.total_samples_written() > 0 {
+                                profile_log!(
+                                    "chunk {} first audio at +{}ms",
+                                    chunk_idx,
+                                    t_feed.elapsed().as_millis()
+                                );
+                                first_audio_logged = true;
+                            }
+                            Ok(cont)
+                        },
+                    );
+
+                    match outcome {
+                        Ok(backbone::StreamOutcome::Completed { generated }) => {
+                            profile_log!(
+                                "chunk {} backbone done at +{}ms ({} tokens), draining decoder",
+                                chunk_idx,
+                                t_feed.elapsed().as_millis(),
+                                generated
+                            );
+                            // Clean end: drain the held-back margin.
+                            match stream.finish(&mut *sink, &is_cancelled) {
+                                Ok(true) => {
+                                    total_samples_written += stream.total_samples_written() as u64;
+                                    profile_log!(
+                                        "chunk {} decode done at +{}ms ({} samples)",
+                                        chunk_idx,
+                                        t_feed.elapsed().as_millis(),
+                                        stream.total_samples_written()
+                                    );
+                                }
+                                Ok(false) => {
+                                    cancelled = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    sink.on_error(tag, format!("decoder error: {}", e));
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(backbone::StreamOutcome::Hallucinated { generated }) => {
+                            profile_log!(
+                                "chunk {} hallucinated at +{}ms ({} tokens); dropping held-back tail",
+                                chunk_idx,
+                                t_feed.elapsed().as_millis(),
+                                generated
+                            );
+                            // The degenerate run is still buffered behind the
+                            // holdback margin; by NOT calling finish() those
+                            // frames are dropped and never reach the sink.
+                            sink.on_error(tag, "hallucination detected".to_string());
+                            break;
+                        }
+                        Ok(backbone::StreamOutcome::Aborted) => {
                             cancelled = true;
                             break;
                         }
                         Err(e) => {
                             sink.on_error(tag, format!("backbone error: {}", e));
                             break;
-                        }
-                    };
-
-                    if backbone_output.hallucinated {
-                        sink.on_error(tag, "hallucination detected".to_string());
-                        break;
-                    }
-
-                    // Run decoder with streaming
-                    if !backbone_output.hidden_states.is_empty() {
-                        match decoder::decode_streaming_cancellable(
-                            decoder,
-                            &backbone_output.hidden_states,
-                            &mut *sink,
-                            is_cancelled,
-                        ) {
-                            Ok(Some(n)) => {
-                                total_samples_written += n as u64;
-                            }
-                            Ok(None) => {
-                                cancelled = true;
-                                break;
-                            }
-                            Err(e) => {
-                                sink.on_error(tag, format!("decoder error: {}", e));
-                                break;
-                            }
                         }
                     }
                 }

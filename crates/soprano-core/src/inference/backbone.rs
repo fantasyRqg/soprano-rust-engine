@@ -2,6 +2,7 @@
 //! Port of the generation loop from soprano-web-onnx/onnx-streaming.js
 
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use ndarray::Array4;
 use ort::session::Session;
@@ -9,6 +10,7 @@ use ort::value::{DynValue, Tensor};
 
 use super::sampler::{sample, SamplingParams};
 use super::session::*;
+use crate::profile::profile_log;
 use crate::text::tokenizer::TOKEN_STOP;
 
 /// Result of a single backbone generation run.
@@ -35,7 +37,7 @@ impl HallucinationDetector {
             prev_hidden: None,
             consecutive_similar: 0,
             threshold: 300.0,
-            max_consecutive: 16,
+            max_consecutive: HALLUCINATION_MAX_CONSECUTIVE,
         }
     }
 
@@ -56,6 +58,23 @@ impl HallucinationDetector {
     }
 }
 
+/// How a generation run ended.
+pub(crate) enum GenEnd {
+    /// Reached EOS or the token limit with no problem.
+    Completed,
+    /// Hallucination detector tripped; the run was cut short.
+    Hallucinated,
+    /// `should_cancel` fired or the per-token callback asked to stop.
+    Aborted,
+}
+
+/// Outcome of a streaming generation run, for the coordinator in `tts`.
+pub(crate) enum StreamOutcome {
+    Completed { generated: usize },
+    Hallucinated { generated: usize },
+    Aborted,
+}
+
 /// Run autoregressive generation on the backbone model.
 pub fn generate(
     session: &mut Session,
@@ -66,14 +85,88 @@ pub fn generate(
         .expect("non-cancellable generation cannot be cancelled"))
 }
 
+/// Generate and collect all hidden states/tokens into a `BackboneOutput`.
+/// Returns `None` if cancelled. On hallucination the returned buffer includes
+/// the degenerate token (the caller discards it).
 pub(crate) fn generate_cancellable(
     session: &mut Session,
     input_ids: &[i64],
     params: &SamplingParams,
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<BackboneOutput>, String> {
+    let mut hidden_states = Vec::new();
+    let mut generated_tokens = Vec::new();
+    let end = generate_core(
+        session,
+        input_ids,
+        params,
+        should_cancel,
+        |token, hidden| {
+            generated_tokens.push(token);
+            hidden_states.push(hidden.to_vec());
+            Ok(true)
+        },
+    )?;
+    Ok(match end {
+        GenEnd::Aborted => None,
+        GenEnd::Hallucinated => Some(BackboneOutput {
+            hidden_states,
+            generated_tokens,
+            hallucinated: true,
+        }),
+        GenEnd::Completed => Some(BackboneOutput {
+            hidden_states,
+            generated_tokens,
+            hallucinated: false,
+        }),
+    })
+}
+
+/// Generate and hand each token's hidden state to `on_hidden` as soon as it is
+/// produced, so a decoder can stream audio while generation continues.
+/// `on_hidden` returns `Ok(false)` to stop early (e.g. the sink closed).
+pub(crate) fn generate_streaming_cancellable(
+    session: &mut Session,
+    input_ids: &[i64],
+    params: &SamplingParams,
+    should_cancel: impl Fn() -> bool,
+    mut on_hidden: impl FnMut(&[f32]) -> Result<bool, String>,
+) -> Result<StreamOutcome, String> {
+    let mut generated = 0usize;
+    let end = generate_core(
+        session,
+        input_ids,
+        params,
+        should_cancel,
+        |_token, hidden| {
+            generated += 1;
+            on_hidden(hidden)
+        },
+    )?;
+    Ok(match end {
+        GenEnd::Completed => StreamOutcome::Completed { generated },
+        GenEnd::Hallucinated => StreamOutcome::Hallucinated { generated },
+        GenEnd::Aborted => StreamOutcome::Aborted,
+    })
+}
+
+/// Core autoregressive loop. `on_step` is invoked with each generated token and
+/// its hidden state (after the EOS check, before hallucination detection — so a
+/// hallucination run's tokens are delivered but the EOS token is not). It
+/// returns `Ok(false)` to abort generation.
+fn generate_core(
+    session: &mut Session,
+    input_ids: &[i64],
+    params: &SamplingParams,
+    should_cancel: impl Fn() -> bool,
+    mut on_step: impl FnMut(u32, &[f32]) -> Result<bool, String>,
+) -> Result<GenEnd, String> {
     let mut rng = rand::rng();
     let prompt_len = input_ids.len();
+    let t_total = Instant::now();
+    let mut prefill_ms: u128 = 0;
+    let mut step_time = Duration::ZERO;
+    let mut step_count: usize = 0;
 
     // Initialize seen tokens mask for repetition penalty
     let mut seen_tokens = vec![false; VOCAB_SIZE];
@@ -110,8 +203,6 @@ pub(crate) fn generate_cancellable(
 
     let mut current_ids: Vec<i64> = input_ids.to_vec();
     let mut seq_len = prompt_len;
-    let mut hidden_states_buffer: Vec<Vec<f32>> = Vec::new();
-    let mut generated_tokens: Vec<u32> = Vec::new();
     let mut hallucination_detector = HallucinationDetector::new();
 
     // Find output indices by name
@@ -131,7 +222,7 @@ pub(crate) fn generate_cancellable(
 
     for _step in 0..MAX_NEW_TOKENS {
         if should_cancel() {
-            return Ok(None);
+            return Ok(GenEnd::Aborted);
         }
 
         let input_len = current_ids.len();
@@ -172,12 +263,24 @@ pub(crate) fn generate_cancellable(
         }
 
         // Run backbone inference
+        let t_run = Instant::now();
         let mut outputs = session
             .run(inputs)
             .map_err(|e| format!("backbone inference failed: {}", e))?;
+        if _step == 0 {
+            prefill_ms = t_run.elapsed().as_millis();
+            profile_log!(
+                "backbone prefill: {}ms ({} prompt tokens)",
+                prefill_ms,
+                prompt_len
+            );
+        } else {
+            step_time += t_run.elapsed();
+            step_count += 1;
+        }
 
         if should_cancel() {
-            return Ok(None);
+            return Ok(GenEnd::Aborted);
         }
 
         // Extract logits for the last token position and sample the next
@@ -224,22 +327,21 @@ pub(crate) fn generate_cancellable(
             break;
         }
 
-        // Collect hidden state from this model call's output
-        // (Python: hidden_states.append(last_hidden[0, -1, :]))
-        hidden_states_buffer.push(hidden_vec.clone());
-        generated_tokens.push(next_token);
-
         if (next_token as usize) < VOCAB_SIZE {
             seen_tokens[next_token as usize] = true;
         }
 
+        // Hand the hidden state to the callback (collect or stream). Done
+        // before hallucination detection so the run's tokens are delivered;
+        // the streaming decoder holds them back behind its margin and drops
+        // them if the detector then trips.
+        if !on_step(next_token, &hidden_vec)? {
+            return Ok(GenEnd::Aborted);
+        }
+
         // Hallucination detection
         if hallucination_detector.check(&hidden_vec) {
-            return Ok(Some(BackboneOutput {
-                hidden_states: hidden_states_buffer,
-                generated_tokens,
-                hallucinated: true,
-            }));
+            return Ok(GenEnd::Hallucinated);
         }
 
         // Next step: single token input
@@ -247,9 +349,17 @@ pub(crate) fn generate_cancellable(
         seq_len += 1;
     }
 
-    Ok(Some(BackboneOutput {
-        hidden_states: hidden_states_buffer,
-        generated_tokens,
-        hallucinated: false,
-    }))
+    profile_log!(
+        "backbone total: {}ms (prefill={}ms, {} decode steps, avg {:.1}ms/step)",
+        t_total.elapsed().as_millis(),
+        prefill_ms,
+        step_count,
+        if step_count > 0 {
+            step_time.as_secs_f64() * 1000.0 / step_count as f64
+        } else {
+            0.0
+        }
+    );
+
+    Ok(GenEnd::Completed)
 }

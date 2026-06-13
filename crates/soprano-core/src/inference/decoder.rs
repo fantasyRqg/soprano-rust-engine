@@ -1,12 +1,15 @@
 //! Vocos decoder inference with sliding window for streaming.
 //! Port of the decoder logic from soprano-web-onnx/onnx-streaming.js
 
+use std::time::Instant;
+
 use ort::session::Session;
 use ort::value::Tensor;
 
 use super::session::*;
 use crate::audio::convert::f32_to_i16;
 use crate::audio::sink::{AudioSink, SinkError};
+use crate::profile::profile_log;
 
 fn write_f32_pcm(
     sink: &mut dyn AudioSink,
@@ -104,58 +107,153 @@ pub fn decode_streaming(
     )
 }
 
+/// Decode a complete hidden-state buffer in one streaming pass. Equivalent to
+/// pushing every token through [`StreamingDecode`] with no holdback and then
+/// finishing — kept as the reference entry point exercised by the lossless
+/// test. Returns `None` if cancelled mid-stream.
 pub(crate) fn decode_streaming_cancellable(
     session: &mut Session,
     hidden_states: &[Vec<f32>],
     sink: &mut dyn AudioSink,
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<usize>, String> {
-    if hidden_states.is_empty() {
-        return Ok(Some(0));
-    }
-
-    let total_tokens = hidden_states.len();
-    // The decoder emits (W - 1) audio frames of SAMPLES_PER_TOKEN each for a
-    // window of W tokens, so a single token yields no audio.
-    if total_tokens < 2 {
-        return Ok(Some(0));
-    }
-    let total_frames = total_tokens - 1;
-    let mut total_samples_written = 0;
-    let mut offset = 0;
-
-    while offset < total_frames {
-        if should_cancel() {
+    let mut stream = StreamingDecode::new(session, 0);
+    for hidden in hidden_states {
+        if !stream.push(hidden, sink, &should_cancel)? {
             return Ok(None);
         }
+    }
+    if !stream.finish(sink, &should_cancel)? {
+        return Ok(None);
+    }
+    Ok(Some(stream.total_samples_written()))
+}
 
-        let chunk_end = (offset + CHUNK_SIZE).min(total_frames);
+/// Incremental sliding-window decoder. Hidden states are pushed one token at a
+/// time as the backbone produces them; each [`push`](Self::push) flushes any
+/// windows that have gained enough right context (and cleared the holdback
+/// margin) so audio streams out while generation is still running. Call
+/// [`finish`](Self::finish) once generation ends cleanly to drain the margin.
+///
+/// The emitted audio is bit-for-bit identical to decoding the whole sequence at
+/// once (`decode_all`): every window carries `RECEPTIVE_FIELD` tokens of
+/// context on both sides, so there are no seams to crossfade.
+pub struct StreamingDecode<'s> {
+    session: &'s mut Session,
+    /// All hidden states produced so far. ~2 KB/token, ≤ MAX_NEW_TOKENS, so the
+    /// full buffer stays under ~1 MB — not worth a sliding window.
+    hidden: Vec<Vec<f32>>,
+    /// Index of the next frame to emit.
+    next_frame: usize,
+    /// Frames kept un-emitted behind the generation frontier (see
+    /// `STREAM_HOLDBACK_FRAMES`). 0 emits as soon as right context exists.
+    holdback: usize,
+    total_samples_written: usize,
+}
 
-        // Decode a window with RECEPTIVE_FIELD tokens of context on BOTH sides.
-        // With context on each side, the frames we emit are bit-for-bit the same
-        // as decoding the whole sequence at once — lossless streaming, no need to
-        // crossfade seams (the previous left-only window decoded each chunk's
-        // trailing frames without right context, producing audible seams).
-        let w0 = offset.saturating_sub(RECEPTIVE_FIELD);
-        let w1 = (chunk_end + RECEPTIVE_FIELD).min(total_tokens);
-        let audio = run_decoder(session, &hidden_states[w0..w1])?;
-
-        // Emit frames [offset, chunk_end); local frame index = global index - w0.
-        let start = (offset - w0) * SAMPLES_PER_TOKEN;
-        let end = ((chunk_end - w0) * SAMPLES_PER_TOKEN).min(audio.len());
-        if start < end
-            && !write_f32_pcm(
-                sink,
-                &audio[start..end],
-                &mut total_samples_written,
-                &should_cancel,
-            )?
-        {
-            return Ok(None);
+impl<'s> StreamingDecode<'s> {
+    pub fn new(session: &'s mut Session, holdback: usize) -> Self {
+        Self {
+            session,
+            hidden: Vec::new(),
+            next_frame: 0,
+            holdback,
+            total_samples_written: 0,
         }
-
-        offset = chunk_end;
     }
 
-    Ok(Some(total_samples_written))
+    pub fn total_samples_written(&self) -> usize {
+        self.total_samples_written
+    }
+
+    /// Append one token's hidden state and flush any now-emittable windows.
+    /// Returns `Ok(false)` if the sink stopped accepting (closed or cancelled),
+    /// in which case the caller should abandon this stream.
+    pub fn push(
+        &mut self,
+        hidden: &[f32],
+        sink: &mut dyn AudioSink,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        self.hidden.push(hidden.to_vec());
+        self.drain(false, sink, should_cancel)
+    }
+
+    /// Drain every remaining buffered frame, ignoring the holdback margin. Call
+    /// once generation has ended *cleanly* (EOS or token limit). On a
+    /// hallucination/cancel the caller must NOT call this — the held-back frames
+    /// are meant to be dropped.
+    pub fn finish(
+        &mut self,
+        sink: &mut dyn AudioSink,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        self.drain(true, sink, should_cancel)
+    }
+
+    fn drain(
+        &mut self,
+        final_flush: bool,
+        sink: &mut dyn AudioSink,
+        should_cancel: &impl Fn() -> bool,
+    ) -> Result<bool, String> {
+        let avail = self.hidden.len();
+        // The decoder emits (W - 1) frames for a window of W tokens, so fewer
+        // than 2 tokens yields no audio.
+        if avail < 2 {
+            return Ok(true);
+        }
+        let total_frames = avail - 1;
+
+        while self.next_frame < total_frames {
+            if should_cancel() {
+                return Ok(false);
+            }
+
+            let chunk_end = (self.next_frame + CHUNK_SIZE).min(total_frames);
+
+            // Mid-stream we only emit windows that have a full RECEPTIVE_FIELD of
+            // right context AND sit behind the holdback margin; the final flush
+            // drains the tail regardless. The margin (>= RECEPTIVE_FIELD) keeps
+            // a detection window of frames un-emitted so a late hallucination
+            // never reaches the sink.
+            if !final_flush {
+                let margin = self.holdback.max(RECEPTIVE_FIELD);
+                if chunk_end + margin > avail {
+                    break;
+                }
+            }
+
+            // Decode a window with RECEPTIVE_FIELD tokens of context on BOTH
+            // sides — lossless, no seam crossfade needed.
+            let w0 = self.next_frame.saturating_sub(RECEPTIVE_FIELD);
+            let w1 = (chunk_end + RECEPTIVE_FIELD).min(avail);
+            let t_window = Instant::now();
+            let audio = run_decoder(self.session, &self.hidden[w0..w1])?;
+            profile_log!(
+                "decoder window: {}ms ({} tokens decoded for {} frames emitted)",
+                t_window.elapsed().as_millis(),
+                w1 - w0,
+                chunk_end - self.next_frame
+            );
+
+            // Emit frames [next_frame, chunk_end); local index = global - w0.
+            let start = (self.next_frame - w0) * SAMPLES_PER_TOKEN;
+            let end = ((chunk_end - w0) * SAMPLES_PER_TOKEN).min(audio.len());
+            if start < end
+                && !write_f32_pcm(
+                    sink,
+                    &audio[start..end],
+                    &mut self.total_samples_written,
+                    should_cancel,
+                )?
+            {
+                return Ok(false);
+            }
+
+            self.next_frame = chunk_end;
+        }
+
+        Ok(true)
+    }
 }

@@ -7,6 +7,7 @@
 
 pub mod audio;
 pub mod inference;
+pub(crate) mod profile;
 pub mod text;
 pub mod tts;
 
