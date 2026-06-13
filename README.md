@@ -39,6 +39,10 @@ A cross-platform real-time text-to-speech engine written in Rust, wrapping the S
 └─────────────────────────────────────────────────┘
 ```
 
+For the non-obvious internal designs — interleaved generation/decoding, the
+lossless windowed decoder, hallucination detection, epoch-based flush, and the
+zero-copy KV cache — see [`crates/soprano-core/README.md`](crates/soprano-core/README.md).
+
 ## Workspace Crates
 
 | Crate | Description |
