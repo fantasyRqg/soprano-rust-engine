@@ -411,6 +411,139 @@ fn test_e2e_chunk_error_aborts_rest_of_feed() {
     );
 }
 
+/// Reproduces docs/issues/2026-06-14-empty-synthesis-for-sentence.md.
+///
+/// The host feeds six consecutive sentences from one Agatha Christie paragraph,
+/// each as its own feed tagged with the host's sentence index. The engine fires
+/// `on_sentence_start` for tag 3 ("A very profound statement, Tuppence.") but
+/// synthesizes zero PCM samples for it, so its boundary lands at the same sample
+/// offset as tag 4's. The sentence vanishes from audio and from any tag timeline.
+///
+/// Observed cause (not visible in the original host-side report): the engine
+/// fires `on_error(3, "hallucination detected")` and aborts the chunk to zero
+/// samples, yet still emits tag 3's start marker — so tag 3 and tag 4 collapse
+/// to one offset.
+///
+/// Engine guarantee under test (issue's suggested guarantees #1/#2): every
+/// emitted start marker must be followed by at least one sample before the next
+/// marker, so two consecutive markers can never share an offset. This is
+/// fix-agnostic — it passes whether the fix synthesizes audio for tag 3 or
+/// stops emitting tag 3's boundary (and reports the error) instead.
+#[test]
+fn test_e2e_consecutive_short_sentences_each_produce_audio() {
+    if !models_available() {
+        return;
+    }
+
+    // Verbatim from the issue (curly quotes U+201C/U+201D, em-dash U+2014).
+    let sentences: [&str; 6] = [
+        "\u{201C}So Tommy and Tuppence were married,\u{201D} she chanted, and lived happily ever after. ",
+        "And six years later they were still living together happily ever afterwards. ",
+        "It is extraordinary,\u{201D} she said, \u{201C}how different everything always is from what you think it is going to be. ",
+        "\u{201C}A very profound statement, Tuppence. ",
+        "But not original. ",
+        "Eminent poets and still more eminent divines have said it before\u{2014}and, if you will excuse me, you have said it before too. ",
+    ];
+
+    let sink = CollectorSink::new(10_000_000);
+    let samples_ref = sink.samples();
+    let starts_ref = sink.starts();
+    let errors_ref = sink.errors();
+
+    let config = SopranoConfig {
+        model_path: models_dir().to_string_lossy().to_string(),
+        temperature: 0.0, // greedy for deterministic results
+        ..Default::default()
+    };
+
+    let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
+
+    // Feed each sentence as its own tagged feed, exactly like the host.
+    for (tag, sentence) in sentences.iter().enumerate() {
+        engine
+            .feed(sentence, tag as u64)
+            .unwrap_or_else(|e| panic!("feed for tag {tag} failed: {e:?}"));
+    }
+    engine.drain();
+
+    let samples = samples_ref.lock().unwrap();
+    let starts = starts_ref.lock().unwrap();
+    let errors = errors_ref.lock().unwrap();
+
+    eprintln!("Total samples: {}", samples.len());
+    eprintln!("Errors: {:?}", *errors);
+    eprintln!("Start markers (tag, offset, received): {:?}", *starts);
+
+    // Span of each emitted marker = samples between its boundary and the next
+    // boundary (the last marker runs to the end of the buffer). Every emitted
+    // marker must occupy a non-zero span, i.e. consecutive markers must report
+    // strictly increasing offsets. With the bug, tag 3's marker shares tag 4's
+    // offset (zero span) — the sentence is silently dropped.
+    let total = samples.len() as u64;
+    for i in 0..starts.len() {
+        let (tag, offset, _) = starts[i];
+        let next_offset = if i + 1 < starts.len() {
+            starts[i + 1].1
+        } else {
+            total
+        };
+        let span = next_offset.saturating_sub(offset);
+        eprintln!("tag {tag}: offset={offset} span={span} samples");
+        assert!(
+            span > 0,
+            "tag {tag} (\"{}\") was acknowledged with a start marker at offset {offset} \
+             but synthesized zero samples — sentence silently dropped",
+            sentences[tag as usize].trim()
+        );
+    }
+}
+
+/// Minimal isolation reproduction: the issue notes the drop happens even when
+/// the offending sentence is fed by itself, with no surrounding sentences.
+#[test]
+fn test_e2e_isolated_dropped_sentence_produces_audio() {
+    if !models_available() {
+        return;
+    }
+
+    let sink = CollectorSink::new(10_000_000);
+    let samples_ref = sink.samples();
+    let starts_ref = sink.starts();
+    let errors_ref = sink.errors();
+
+    let config = SopranoConfig {
+        model_path: models_dir().to_string_lossy().to_string(),
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
+
+    engine
+        .feed("\u{201C}A very profound statement, Tuppence. ", 3)
+        .expect("feed failed");
+    engine.drain();
+
+    let samples = samples_ref.lock().unwrap();
+    let starts = starts_ref.lock().unwrap();
+    let errors = errors_ref.lock().unwrap();
+
+    eprintln!("Total samples: {}", samples.len());
+    eprintln!("Errors: {:?}", *errors);
+    eprintln!("Start markers: {:?}", *starts);
+
+    // If the engine acknowledged the sentence with a start marker, it must have
+    // synthesized at least one sample for it. (A fix that instead drops the
+    // marker and reports the error is also acceptable, so this only asserts the
+    // implication, not that a marker is present.)
+    if !starts.is_empty() {
+        assert!(
+            !samples.is_empty(),
+            "isolated sentence acknowledged by a start marker but synthesized zero samples"
+        );
+    }
+}
+
 /// Sink that accepts the first write, then reports Closed forever.
 struct ClosingSink {
     write_calls: Arc<Mutex<u64>>,
@@ -516,3 +649,5 @@ fn test_e2e_offset_resets_after_flush() {
     assert_eq!(starts[0].1, 0, "first feed offset");
     assert_eq!(starts[1].1, 0, "offset must reset to 0 after flush");
 }
+
+

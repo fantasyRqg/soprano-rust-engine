@@ -274,9 +274,15 @@ fn worker_loop(
                     continue;
                 }
 
-                // One marker per feed: the next samples written belong to this
-                // feed, starting at the current cumulative sample offset.
-                sink.on_sentence_start(tag, total_samples_written);
+                // One marker per feed, emitted lazily by the decoder the instant
+                // before this feed writes its first sample (see
+                // `arm_start_marker`). A feed that synthesizes nothing — e.g. a
+                // chunk the backbone collapses into a hallucination run, whose
+                // held-back frames are dropped — therefore emits no boundary at
+                // all, rather than an orphan boundary that would collapse onto
+                // the next feed's offset.
+                let feed_start = total_samples_written;
+                let mut marker_emitted = false;
 
                 let mut cancelled = false;
                 for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
@@ -326,6 +332,12 @@ fn worker_loop(
                     // (detected only after the fact) never reaches the sink.
                     let mut stream =
                         decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES);
+                    // Arm the feed's start boundary on the first chunk that can
+                    // still produce its first sample; the decoder fires it the
+                    // instant before that sample reaches the sink.
+                    if !marker_emitted {
+                        stream.arm_start_marker(tag, feed_start);
+                    }
                     let mut first_audio_logged = false;
                     let outcome = backbone::generate_streaming_cancellable(
                         &mut *backbone,
@@ -358,6 +370,9 @@ fn worker_loop(
                             match stream.finish(&mut *sink, &is_cancelled) {
                                 Ok(true) => {
                                     total_samples_written += stream.total_samples_written() as u64;
+                                    if stream.total_samples_written() > 0 {
+                                        marker_emitted = true;
+                                    }
                                     profile_log!(
                                         "chunk {} decode done at +{}ms ({} samples)",
                                         chunk_idx,

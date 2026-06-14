@@ -189,8 +189,10 @@ impl SopranoTts {
 
     /// Feed text for synthesis. Non-blocking — queues internally.
     /// `tag` is an opaque app-defined identifier echoed back via
-    /// `on_sentence_start` at the sample where this feed's audio begins.
-    /// Synthesis errors are delivered asynchronously through `on_error`.
+    /// `on_sentence_start` at the sample where this feed's audio begins. A feed
+    /// that synthesizes no audio fires no `on_sentence_start` and is reported
+    /// via `on_error` instead. Synthesis errors are delivered asynchronously
+    /// through `on_error`.
     pub fn feed(&self, text: String, tag: u64) -> Result<(), FfiError> {
         self.inner.feed(&text, tag).map_err(FfiError::from)
     }
