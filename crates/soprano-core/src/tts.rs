@@ -172,9 +172,9 @@ impl SopranoTTS {
 
     /// Feed text for synthesis. Non-blocking — queues internally.
     ///
-    /// `tag` is an opaque app-defined identifier echoed back via
-    /// `AudioSink::on_sentence_start` at the sample where this feed's audio
-    /// begins. The engine never interprets it.
+    /// `tag` is an opaque app-defined identifier attached to every
+    /// `AudioSink::write` carrying this feed's audio, so the host can map
+    /// played samples back to the sentence. The engine never interprets it.
     ///
     /// This only returns queueing errors, such as a stopped worker. Synthesis
     /// errors from normalization, tokenization, inference, or decoding are
@@ -243,8 +243,6 @@ fn worker_loop(
     mut params: SamplingParams,
     epoch: Arc<AtomicU64>,
 ) {
-    let mut total_samples_written: u64 = 0;
-
     loop {
         match rx.recv() {
             Ok(WorkerMsg::Feed {
@@ -274,16 +272,11 @@ fn worker_loop(
                     continue;
                 }
 
-                // One marker per feed, emitted lazily by the decoder the instant
-                // before this feed writes its first sample (see
-                // `arm_start_marker`). A feed that synthesizes nothing — e.g. a
+                // The feed's audio carries its `tag` on every sink write (see
+                // `AudioSink::write`). A feed that synthesizes nothing — e.g. a
                 // chunk the backbone collapses into a hallucination run, whose
-                // held-back frames are dropped — therefore emits no boundary at
-                // all, rather than an orphan boundary that would collapse onto
-                // the next feed's offset.
-                let feed_start = total_samples_written;
-                let mut marker_emitted = false;
-
+                // held-back frames are dropped — therefore writes no tagged
+                // audio at all and is reported via `on_error` instead.
                 let mut cancelled = false;
                 for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
                     if is_cancelled() {
@@ -331,13 +324,7 @@ fn worker_loop(
                     // holds back STREAM_HOLDBACK_FRAMES so a hallucination run
                     // (detected only after the fact) never reaches the sink.
                     let mut stream =
-                        decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES);
-                    // Arm the feed's start boundary on the first chunk that can
-                    // still produce its first sample; the decoder fires it the
-                    // instant before that sample reaches the sink.
-                    if !marker_emitted {
-                        stream.arm_start_marker(tag, feed_start);
-                    }
+                        decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES, tag);
                     let mut first_audio_logged = false;
                     let outcome = backbone::generate_streaming_cancellable(
                         &mut *backbone,
@@ -369,10 +356,6 @@ fn worker_loop(
                             // Clean end: drain the held-back margin.
                             match stream.finish(&mut *sink, &is_cancelled) {
                                 Ok(true) => {
-                                    total_samples_written += stream.total_samples_written() as u64;
-                                    if stream.total_samples_written() > 0 {
-                                        marker_emitted = true;
-                                    }
                                     profile_log!(
                                         "chunk {} decode done at +{}ms ({} samples)",
                                         chunk_idx,
@@ -419,9 +402,10 @@ fn worker_loop(
                 }
             }
             Ok(WorkerMsg::Flush) => {
-                // Stale feeds are skipped by the epoch check as they dequeue;
-                // the flush itself only resets the stream's sample offset.
-                total_samples_written = 0;
+                // Nothing to reset on the worker: stale feeds are skipped by the
+                // epoch check as they dequeue, in-flight synthesis cancels on the
+                // same check, and audio offsets are now the host's to track from
+                // the tagged `write` stream (it clears its own buffer on flush).
             }
             Ok(WorkerMsg::Drain { done_tx }) => {
                 let _ = done_tx.send(());

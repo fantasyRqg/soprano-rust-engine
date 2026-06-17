@@ -4,16 +4,20 @@ use soprano_core::{AudioSink, SinkError, SopranoConfig, SopranoTTS};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
-/// Test sink that collects audio and records every on_sentence_start marker.
-/// Each marker stores `(tag, reported_offset, samples_received_at_marker)` so
-/// tests can assert the reported offset matches the sink's own received count
-/// at the instant the marker fired.
+/// Test sink that collects audio and reconstructs a sentence-boundary timeline
+/// from the tagged write stream: a "start" is recorded whenever `write` is
+/// called with a tag different from the previous call's. Each entry stores
+/// `(tag, offset, samples_received_at_start)` where both offsets equal the
+/// sink's received count just before that tag's first sample — so a feed that
+/// writes no audio contributes no start at all (the tagged-buffer analogue of
+/// the old colliding/zero-length boundary).
 struct CollectorSink {
     samples: Arc<Mutex<Vec<i16>>>,
     starts: Arc<Mutex<Vec<(u64, u64, u64)>>>,
     drain_complete: Arc<(Mutex<bool>, Condvar)>,
     errors: Arc<Mutex<Vec<(u64, String)>>>,
     max_samples: usize,
+    last_tag: Option<u64>,
 }
 
 impl CollectorSink {
@@ -24,6 +28,7 @@ impl CollectorSink {
             drain_complete: Arc::new((Mutex::new(false), Condvar::new())),
             errors: Arc::new(Mutex::new(Vec::new())),
             max_samples,
+            last_tag: None,
         }
     }
 
@@ -41,8 +46,15 @@ impl CollectorSink {
 }
 
 impl AudioSink for CollectorSink {
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError> {
+    fn write(&mut self, tag: u64, samples: &[i16]) -> Result<usize, SinkError> {
         let mut buf = self.samples.lock().unwrap();
+        // A new tag means this feed's audio just started: record its boundary
+        // at the current received count, before any of its samples land.
+        if self.last_tag != Some(tag) {
+            let offset = buf.len() as u64;
+            self.starts.lock().unwrap().push((tag, offset, offset));
+            self.last_tag = Some(tag);
+        }
         let available = self.max_samples.saturating_sub(buf.len());
         let to_write = samples.len().min(available);
         if to_write == 0 && !samples.is_empty() {
@@ -58,14 +70,6 @@ impl AudioSink for CollectorSink {
     fn available(&self) -> usize {
         let buf = self.samples.lock().unwrap();
         self.max_samples.saturating_sub(buf.len())
-    }
-
-    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64) {
-        let received = self.samples.lock().unwrap().len() as u64;
-        self.starts
-            .lock()
-            .unwrap()
-            .push((tag, sample_offset, received));
     }
 
     fn on_drain_complete(&mut self) {
@@ -336,8 +340,8 @@ fn test_e2e_feed_after_flush_is_not_discarded() {
     let long_text = "hello world again and again we keep talking ".repeat(4);
     engine.feed(&long_text, 1).expect("feed 1 failed");
 
-    // Wait until the worker has actually picked up feed 1 (its marker fires
-    // just before synthesis starts).
+    // Wait until the worker has actually started streaming feed 1's audio
+    // (its first tagged write lands once synthesis produces samples).
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while starts_ref.lock().unwrap().is_empty() {
         assert!(
@@ -414,21 +418,18 @@ fn test_e2e_chunk_error_aborts_rest_of_feed() {
 /// Reproduces docs/issues/2026-06-14-empty-synthesis-for-sentence.md.
 ///
 /// The host feeds six consecutive sentences from one Agatha Christie paragraph,
-/// each as its own feed tagged with the host's sentence index. The engine fires
-/// `on_sentence_start` for tag 3 ("A very profound statement, Tuppence.") but
-/// synthesizes zero PCM samples for it, so its boundary lands at the same sample
-/// offset as tag 4's. The sentence vanishes from audio and from any tag timeline.
+/// each as its own feed tagged with the host's sentence index. Historically the
+/// engine could synthesize zero PCM samples for tag 3 ("A very profound
+/// statement, Tuppence.") yet still announce its boundary, so the sentence
+/// vanished from audio and from any tag timeline (a zero-length / colliding
+/// boundary the host could not represent).
 ///
-/// Observed cause (not visible in the original host-side report): the engine
-/// fires `on_error(3, "hallucination detected")` and aborts the chunk to zero
-/// samples, yet still emits tag 3's start marker — so tag 3 and tag 4 collapse
-/// to one offset.
-///
-/// Engine guarantee under test (issue's suggested guarantees #1/#2): every
-/// emitted start marker must be followed by at least one sample before the next
-/// marker, so two consecutive markers can never share an offset. This is
-/// fix-agnostic — it passes whether the fix synthesizes audio for tag 3 or
-/// stops emitting tag 3's boundary (and reports the error) instead.
+/// Under tagged buffers there is no separate boundary to collide: a feed's tag
+/// rides on every `write`, so a feed that produces audio shows up as a tagged
+/// start and a feed that produces none shows up only as an `on_error`. The
+/// failure this guards against is a tag that is *silently* absent from BOTH —
+/// neither audible nor reported. This is fix-agnostic: it passes whether the
+/// engine synthesizes audio for tag 3 or drops it with an error.
 #[test]
 fn test_e2e_consecutive_short_sentences_each_produce_audio() {
     if !models_available() {
@@ -472,28 +473,29 @@ fn test_e2e_consecutive_short_sentences_each_produce_audio() {
 
     eprintln!("Total samples: {}", samples.len());
     eprintln!("Errors: {:?}", *errors);
-    eprintln!("Start markers (tag, offset, received): {:?}", *starts);
+    eprintln!("Tagged starts (tag, offset, received): {:?}", *starts);
 
-    // Span of each emitted marker = samples between its boundary and the next
-    // boundary (the last marker runs to the end of the buffer). Every emitted
-    // marker must occupy a non-zero span, i.e. consecutive markers must report
-    // strictly increasing offsets. With the bug, tag 3's marker shares tag 4's
-    // offset (zero span) — the sentence is silently dropped.
-    let total = samples.len() as u64;
-    for i in 0..starts.len() {
-        let (tag, offset, _) = starts[i];
-        let next_offset = if i + 1 < starts.len() {
-            starts[i + 1].1
-        } else {
-            total
-        };
-        let span = next_offset.saturating_sub(offset);
-        eprintln!("tag {tag}: offset={offset} span={span} samples");
+    // Every fed tag must be accounted for: either it produced audio (a tagged
+    // start) or it was reported dropped (an on_error). A tag missing from both
+    // is the silent drop this issue is about.
+    for tag in 0..sentences.len() as u64 {
+        let produced_audio = starts.iter().any(|&(t, ..)| t == tag);
+        let reported_error = errors.iter().any(|&(t, _)| t == tag);
         assert!(
-            span > 0,
-            "tag {tag} (\"{}\") was acknowledged with a start marker at offset {offset} \
-             but synthesized zero samples — sentence silently dropped",
+            produced_audio || reported_error,
+            "tag {tag} (\"{}\") is silently absent: no audio and no on_error",
             sentences[tag as usize].trim()
+        );
+    }
+
+    // Structural sanity: tagged starts appear in feed order at strictly
+    // increasing offsets, so no two ever collide on one sample position.
+    for pair in starts.windows(2) {
+        assert!(
+            pair[1].1 > pair[0].1,
+            "consecutive tagged starts share/inverted offset: {:?} then {:?}",
+            pair[0],
+            pair[1]
         );
     }
 }
@@ -530,16 +532,22 @@ fn test_e2e_isolated_dropped_sentence_produces_audio() {
 
     eprintln!("Total samples: {}", samples.len());
     eprintln!("Errors: {:?}", *errors);
-    eprintln!("Start markers: {:?}", *starts);
+    eprintln!("Tagged starts: {:?}", *starts);
 
-    // If the engine acknowledged the sentence with a start marker, it must have
-    // synthesized at least one sample for it. (A fix that instead drops the
-    // marker and reports the error is also acceptable, so this only asserts the
-    // implication, not that a marker is present.)
-    if !starts.is_empty() {
+    // The sole fed tag (3) must be accounted for: either it produced tagged
+    // audio or it was reported via on_error. It must not vanish from both. And
+    // a tagged start always implies real audio, since a start is only recorded
+    // on an actual write.
+    let produced_audio = starts.iter().any(|&(t, ..)| t == 3);
+    let reported_error = errors.iter().any(|&(t, _)| t == 3);
+    assert!(
+        produced_audio || reported_error,
+        "isolated sentence (tag 3) is silently absent: no audio and no on_error"
+    );
+    if produced_audio {
         assert!(
             !samples.is_empty(),
-            "isolated sentence acknowledged by a start marker but synthesized zero samples"
+            "tag 3 recorded a tagged start but synthesized zero samples"
         );
     }
 }
@@ -551,7 +559,7 @@ struct ClosingSink {
 }
 
 impl AudioSink for ClosingSink {
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError> {
+    fn write(&mut self, _tag: u64, samples: &[i16]) -> Result<usize, SinkError> {
         let mut calls = self.write_calls.lock().unwrap();
         *calls += 1;
         if *calls == 1 {
@@ -564,8 +572,6 @@ impl AudioSink for ClosingSink {
     fn available(&self) -> usize {
         0
     }
-
-    fn on_sentence_start(&mut self, _tag: u64, _sample_offset: u64) {}
 
     fn on_drain_complete(&mut self) {
         let (lock, cvar) = &*self.drain_complete;
@@ -611,8 +617,14 @@ fn test_e2e_closed_sink_stops_synthesis() {
     );
 }
 
+/// Under tagged buffers the engine no longer tracks or resets a cumulative
+/// sample offset — that is the host's job (it clears its own audio buffer on
+/// flush). What the engine must still guarantee is that a feed submitted after
+/// a flush is synthesized and carries its own tag. This sink deliberately does
+/// NOT reset its buffer on flush, so it also documents that the engine leaves
+/// the offset running rather than zeroing it.
 #[test]
-fn test_e2e_offset_resets_after_flush() {
+fn test_e2e_feed_is_tagged_across_flush() {
     if !models_available() {
         return;
     }
@@ -628,12 +640,12 @@ fn test_e2e_offset_resets_after_flush() {
 
     let engine = SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine");
 
-    // First feed produces some audio, advancing the cumulative offset.
+    // First feed produces some audio.
     engine.feed("Hello world.", 1).expect("feed 1 failed");
     engine.drain();
 
-    // Flush resets the stream; drain() blocks until the worker has processed
-    // the flush, so the next feed starts from a reset offset of 0.
+    // drain() blocks until the worker has processed the flush, so feed 2 is
+    // synthesized fresh after it.
     engine.flush();
     engine.drain();
 
@@ -641,13 +653,18 @@ fn test_e2e_offset_resets_after_flush() {
     engine.drain();
 
     let starts = starts_ref.lock().unwrap();
-    eprintln!("Start markers across flush: {:?}", *starts);
-    assert_eq!(starts.len(), 2, "expected 2 markers");
-    assert_eq!(starts[0].0, 1);
-    assert_eq!(starts[1].0, 2);
-    // Both feeds start at offset 0 because flush reset the counter between them.
-    assert_eq!(starts[0].1, 0, "first feed offset");
-    assert_eq!(starts[1].1, 0, "offset must reset to 0 after flush");
+    eprintln!("Tagged starts across flush: {:?}", *starts);
+    assert_eq!(starts.len(), 2, "expected 2 tagged starts");
+    assert_eq!(starts[0].0, 1, "first feed tag");
+    assert_eq!(starts[1].0, 2, "feed after flush keeps its own tag");
+    // Engine does not reset the offset; the (non-resetting) sink sees feed 2
+    // continue from feed 1's running count. A real host clears its buffer on
+    // flush and would instead observe feed 2 starting at 0.
+    assert_eq!(starts[0].1, 0, "first feed starts at 0");
+    assert!(
+        starts[1].1 > 0,
+        "engine should not zero the offset on flush (host owns that now)"
+    );
 }
 
 

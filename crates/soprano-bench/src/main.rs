@@ -61,7 +61,7 @@ impl CountingSink {
 }
 
 impl AudioSink for CountingSink {
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError> {
+    fn write(&mut self, _tag: u64, samples: &[i16]) -> Result<usize, SinkError> {
         let mut fw = self.first_write.lock().unwrap();
         if fw.is_none() {
             *fw = Some(Instant::now());
@@ -73,7 +73,6 @@ impl AudioSink for CountingSink {
     fn available(&self) -> usize {
         usize::MAX
     }
-    fn on_sentence_start(&mut self, _: u64, _: u64) {}
     fn on_drain_complete(&mut self) {}
     fn on_error(&mut self, tag: u64, error: String) {
         eprintln!("  ERROR (feed {}): {}", tag, error);

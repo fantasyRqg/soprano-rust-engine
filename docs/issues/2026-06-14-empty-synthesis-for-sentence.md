@@ -1,6 +1,7 @@
 # Engine emits a sentence boundary but zero audio for some inputs
 
-**Status:** Open
+**Status:** Resolved — superseded the lazy-emit `on_sentence_start` fix by
+removing the boundary callback entirely (see *Resolution* below).
 **Found:** 2026-06-14
 **Reported from:** Hearken-Android (consumer of `soprano-ffi`)
 **Severity:** High — a sentence is silently dropped from playback (no audio, and the
@@ -104,3 +105,38 @@ assertion needed) in Hearken-Android:
 
 - `cc.hearken.app.engine.SopranoEngineTest#feeding_consecutive_short_sentences_reports_every_tag`
 - `cc.hearken.app.integration.PlaybackIntegrationTest#first_sentence_of_paragraph_is_not_skipped`
+
+## Resolution
+
+The root weakness was the **separate `on_sentence_start(tag, sample_offset)`
+boundary callback**: the host had to correlate a separately-delivered offset
+against its own running sample count, and that correlation could drop, collide
+at a shared offset (this bug), or alias against the host's poller. Two fixes
+were considered:
+
+1. *Lazy emit* (commit `7faa5c8`): only fire the boundary in the same breath as
+   the feed's first real sample write, so a zero-output sentence fires no
+   boundary at all. This closed the colliding-offset leak but kept the fragile
+   two-channel design.
+2. *Tagged buffers* (this change, **adopted**): delete `on_sentence_start` and
+   carry the feed's `tag` on every `AudioSink::write` / `FfiAudioSink.write_pcm`.
+   The engine synthesizes one feed at a time, so every sample in a write belongs
+   to exactly one tag — the host attributes audio to a sentence directly, with
+   nothing to correlate. A zero-output sentence writes no tagged audio and is
+   reported via `on_error`; a sentence with audio is unambiguously tagged. The
+   desync is now **unrepresentable** rather than guarded against.
+
+This is a breaking FFI change: the Kotlin host must read the tag off `write_pcm`
+and build its position→tag map from the writes, dropping the `on_sentence_start`
+correlation (and the offset-reset/poller logic that went with it).
+
+Regression coverage (engine repo):
+
+- `crates/soprano-core/tests/decoder_streaming.rs` —
+  `zero_output_stream_writes_no_tagged_audio` and `tagged_writes_carry_the_streams_tag`:
+  deterministic, model-light (synthetic hidden states, no backbone) guards that a
+  zero-output stream writes nothing and that every write carries the stream's tag.
+- `crates/soprano-core/tests/e2e_inference.rs` —
+  `test_e2e_consecutive_short_sentences_each_produce_audio` (the original passage)
+  now asserts every fed tag is either audible or reported via `on_error`, never
+  silently absent from both.

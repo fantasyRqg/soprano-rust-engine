@@ -11,7 +11,15 @@ pub enum SinkError {
 /// App-provided output buffer. Engine writes PCM i16 data into it.
 /// Implementations control memory allocation and backpressure.
 pub trait AudioSink: Send {
-    /// Write PCM i16 samples into the sink.
+    /// Write PCM i16 samples into the sink. `tag` is the app-defined value
+    /// passed to `feed` that this audio belongs to: the engine synthesizes one
+    /// feed at a time, so every sample in a single `write` belongs to exactly
+    /// one `tag`, and the host attributes audio to a sentence directly — no
+    /// separate boundary callback to correlate against a sample count. A feed
+    /// that synthesizes no audio at all (e.g. a chunk the backbone collapses
+    /// into a hallucination run) produces no `write` for its tag and is
+    /// reported via [`on_error`](Self::on_error) instead.
+    ///
     /// MUST block if buffer is full (provides backpressure) or return an error.
     /// Returning `Ok(0)` for non-empty input is treated as a write failure.
     ///
@@ -20,22 +28,11 @@ pub trait AudioSink: Send {
     /// and engine shutdown are only checked between calls, so a `write` that
     /// never returns hangs `flush` semantics and blocks `SopranoTTS`'s `Drop`
     /// (which joins the worker thread) forever.
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError>;
+    fn write(&mut self, tag: u64, samples: &[i16]) -> Result<usize, SinkError>;
 
     /// Available space in samples (not bytes). This is advisory; the engine
     /// relies on `write()` for backpressure.
     fn available(&self) -> usize;
-
-    /// Called at most once per `feed`, in the same breath as that feed's first
-    /// sample is written to the sink. A feed that synthesizes no audio at all
-    /// (e.g. a chunk the backbone collapses into a hallucination run) is
-    /// reported via [`on_error`](Self::on_error) and fires no boundary, so two
-    /// consecutive boundaries can never share an offset. `tag` is the
-    /// app-defined value passed to `feed`. `sample_offset` is the cumulative
-    /// i16 sample count (mono, 32kHz) written to this sink since the start of
-    /// the current stream (resets on flush) — i.e. the sample index at which
-    /// this feed's audio begins.
-    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64);
 
     /// Called when all queued sentences are done.
     fn on_drain_complete(&mut self);

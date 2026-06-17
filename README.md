@@ -176,7 +176,7 @@ let config = SopranoConfig {
 };
 
 let tts = SopranoTTS::new(config, Box::new(my_sink))?;
-tts.feed("Hello, world!", 0)?; // tag echoed back via on_sentence_start
+tts.feed("Hello, world!", 0)?; // tag attached to every write of this feed's audio
 tts.drain(); // blocks until synthesis completes
 ```
 
@@ -184,13 +184,15 @@ tts.drain(); // blocks until synthesis completes
 reported through `AudioSink::on_error` with the failed feed's tag; the rest
 of that feed is aborted.
 
-The `AudioSink` trait lets you provide your own audio output:
+The `AudioSink` trait lets you provide your own audio output. Each `write`
+carries the `tag` of the feed it belongs to (the engine synthesizes one feed at
+a time, so a write never straddles two), so you can map played samples back to a
+sentence directly — no separate boundary callback to correlate:
 
 ```rust
 pub trait AudioSink: Send {
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError>;
+    fn write(&mut self, tag: u64, samples: &[i16]) -> Result<usize, SinkError>;
     fn available(&self) -> usize;
-    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64);
     fn on_drain_complete(&mut self);
     fn on_error(&mut self, tag: u64, error: String);
 }

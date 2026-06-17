@@ -320,28 +320,34 @@ Rules the engine depends on:
   against a dead sink wastes work and drifts sample offsets).
 - A blocked `write()` **must eventually return**; otherwise flush and `Drop` hang
   (§3).
-- Callbacks fire in this order per feed: `on_sentence_start` once at the start →
-  zero or more `write()` → on failure `on_error` (then no more audio for that feed).
+- Callbacks fire in this order per feed: zero or more `write(tag, …)` → on
+  failure `on_error` (then no more audio for that feed). A feed that synthesizes
+  nothing produces no `write` at all, only `on_error`.
 
 ---
 
-## 11. Feed tags & the sample-offset timeline
+## 11. Feed tags & playback tracking
 
 `feed(text, tag)` takes an opaque app-defined `tag`. The engine never interprets
-it — it echoes it back via `on_sentence_start(tag, sample_offset)` exactly once
-per feed, **just before that feed's first audio**. `sample_offset` is the
-cumulative mono i16 sample count written to the sink since the start of the
-current stream.
+it — it **attaches the tag to every `write(tag, samples)`** carrying that feed's
+audio. The engine synthesizes one feed at a time, so every sample in a single
+`write` belongs to exactly one tag (a write never straddles two feeds).
 
 This lets an app map playback position back to which feed is currently audible
-(e.g. for word/sentence highlighting). The offset **resets on `flush()`**, since
-flush begins a new logical stream. `e2e_inference.rs` pins down this behavior
-(one marker per feed, offset reset after flush).
+(e.g. for word/sentence highlighting) directly from the write stream — there is
+no separate boundary callback to correlate against a sample count, drop, or
+collide. A feed that produces no audio (e.g. a hallucination run whose held-back
+frames are dropped) simply writes nothing for its tag and is reported via
+`on_error`, so a sentence is never silently lost. Offset bookkeeping (including
+resetting on `flush()`) is the host's: it tracks position from the bytes it
+enqueues and clears that on flush. `e2e_inference.rs` and `decoder_streaming.rs`
+pin this down (every fed tag is audible-or-errored; writes carry the tag; a
+zero-output stream writes nothing).
 
 > Note the streaming change (§8) slightly altered observable timing: on a
 > hallucinating feed the sink now receives the good-prefix audio *before*
-> `on_error`, whereas the old path emitted no audio for such a feed. The trait
-> signature is unchanged and the "no audio after `on_error`" rule still holds.
+> `on_error`, whereas the old path emitted no audio for such a feed. The
+> "no audio after `on_error`" rule still holds.
 
 ---
 
@@ -384,7 +390,7 @@ This is the instrumentation used to attribute the latency win in §8.
 |---|---|
 | `decoder_streaming::streaming_decode_matches_whole_decode` | Windowed decode is lossless vs. `decode_all` (§7) |
 | `decoder_streaming::interleaved_decode_with_holdback_matches_whole_decode` | Holdback path drains losslessly on clean finish (§8) |
-| `e2e_inference::*` | Full `feed` path: synthesis, length limits, flush/drain, per-feed markers, offset reset, closed-sink abort, chunk-error abort |
+| `e2e_inference::*` | Full `feed` path: synthesis, length limits, flush/drain, per-feed tagging, every-fed-tag-audible-or-errored, closed-sink abort, chunk-error abort |
 | `compare_python` | Token + audio parity with the Python reference (§5–6) |
 
 Integration tests require model files in `models/` and skip gracefully if absent.

@@ -13,6 +13,7 @@ use crate::profile::profile_log;
 
 fn write_f32_pcm(
     sink: &mut dyn AudioSink,
+    tag: u64,
     samples: &[f32],
     total_samples_written: &mut usize,
     should_cancel: &impl Fn() -> bool,
@@ -29,7 +30,7 @@ fn write_f32_pcm(
             return Ok(false);
         }
 
-        match sink.write(&i16_samples[written..]) {
+        match sink.write(tag, &i16_samples[written..]) {
             Ok(0) => return Err("sink write made no progress".to_string()),
             Ok(n) => written += n,
             // A closed sink aborts the feed like a cancellation: keep the
@@ -117,7 +118,7 @@ pub(crate) fn decode_streaming_cancellable(
     sink: &mut dyn AudioSink,
     should_cancel: impl Fn() -> bool,
 ) -> Result<Option<usize>, String> {
-    let mut stream = StreamingDecode::new(session, 0);
+    let mut stream = StreamingDecode::new(session, 0, 0);
     for hidden in hidden_states {
         if !stream.push(hidden, sink, &should_cancel)? {
             return Ok(None);
@@ -149,35 +150,26 @@ pub struct StreamingDecode<'s> {
     /// `STREAM_HOLDBACK_FRAMES`). 0 emits as soon as right context exists.
     holdback: usize,
     total_samples_written: usize,
-    /// A sentence-start boundary to deliver to the sink the instant before this
-    /// stream writes its first sample. `None` once fired or when unused. Gating
-    /// the boundary on a real write means a stream that emits nothing (e.g. a
-    /// hallucination run whose held-back frames are dropped) never produces an
-    /// orphan boundary.
-    pending_start: Option<(u64, u64)>,
+    /// App-defined tag this stream's audio belongs to, attached to every
+    /// `AudioSink::write`. A stream that writes nothing (e.g. a hallucination
+    /// run whose held-back frames are dropped) simply emits no tagged audio.
+    tag: u64,
 }
 
 impl<'s> StreamingDecode<'s> {
-    pub fn new(session: &'s mut Session, holdback: usize) -> Self {
+    pub fn new(session: &'s mut Session, holdback: usize, tag: u64) -> Self {
         Self {
             session,
             hidden: Vec::new(),
             next_frame: 0,
             holdback,
             total_samples_written: 0,
-            pending_start: None,
+            tag,
         }
     }
 
     pub fn total_samples_written(&self) -> usize {
         self.total_samples_written
-    }
-
-    /// Arm a sentence-start boundary to be emitted to the sink immediately
-    /// before this stream's first sample is written. If the stream never writes
-    /// a sample, the boundary is never delivered.
-    pub fn arm_start_marker(&mut self, tag: u64, offset: u64) {
-        self.pending_start = Some((tag, offset));
     }
 
     /// Append one token's hidden state and flush any now-emittable windows.
@@ -254,21 +246,16 @@ impl<'s> StreamingDecode<'s> {
             // Emit frames [next_frame, chunk_end); local index = global - w0.
             let start = (self.next_frame - w0) * SAMPLES_PER_TOKEN;
             let end = ((chunk_end - w0) * SAMPLES_PER_TOKEN).min(audio.len());
-            if start < end {
-                // Deliver the armed boundary in the same breath as the first
-                // sample so its reported offset equals the sink's received
-                // count at that instant.
-                if let Some((tag, offset)) = self.pending_start.take() {
-                    sink.on_sentence_start(tag, offset);
-                }
-                if !write_f32_pcm(
+            if start < end
+                && !write_f32_pcm(
                     sink,
+                    self.tag,
                     &audio[start..end],
                     &mut self.total_samples_written,
                     should_cancel,
-                )? {
-                    return Ok(false);
-                }
+                )?
+            {
+                return Ok(false);
             }
 
             self.next_frame = chunk_end;

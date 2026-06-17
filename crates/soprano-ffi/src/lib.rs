@@ -79,21 +79,21 @@ pub struct EstimateResult {
 /// PCM data is delivered as raw bytes (little-endian i16 samples, 32kHz mono).
 #[uniffi::export(with_foreign)]
 pub trait FfiAudioSink: Send + Sync {
-    /// Write PCM data bytes to the sink. Must block if buffer is full.
-    /// Returns number of bytes written. Returning 0 for non-empty input is
-    /// treated as a write failure by the core engine.
-    fn write_pcm(&self, pcm_data: Vec<u8>) -> i64;
+    /// Write PCM data bytes to the sink. `tag` is the value passed to `feed`
+    /// that this audio belongs to: the engine synthesizes one feed at a time,
+    /// so every byte in a single call belongs to exactly one `tag`. Enqueue the
+    /// bytes and record `(played-sample cursor -> tag)` from the calls
+    /// themselves to drive highlighting — there is no separate boundary
+    /// callback to correlate. A feed that synthesizes no audio produces no
+    /// `write_pcm` for its tag and is reported via `on_error` instead.
+    ///
+    /// Must block if buffer is full. Returns number of bytes written. Returning
+    /// 0 for non-empty input is treated as a write failure by the core engine.
+    fn write_pcm(&self, tag: u64, pcm_data: Vec<u8>) -> i64;
 
     /// Available space in bytes. This is advisory; blocking writes provide
     /// backpressure.
     fn available_bytes(&self) -> u64;
-
-    /// Called once per `feed`, just before that feed's audio begins streaming.
-    /// `tag` is the value passed to `feed`; `sample_offset` is the i16 sample
-    /// index (mono, 32kHz, resets on flush) where this feed's audio starts.
-    /// Build a (sample_offset -> tag) timeline and compare against your audio
-    /// player's played-sample cursor to highlight in sync.
-    fn on_sentence_start(&self, tag: u64, sample_offset: u64);
 
     /// Called when all queued sentences are done.
     fn on_drain_complete(&self);
@@ -109,10 +109,10 @@ struct SinkAdapter {
 }
 
 impl AudioSink for SinkAdapter {
-    fn write(&mut self, samples: &[i16]) -> Result<usize, SinkError> {
+    fn write(&mut self, tag: u64, samples: &[i16]) -> Result<usize, SinkError> {
         // Convert i16 slice to bytes (little-endian)
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let bytes_written = self.inner.write_pcm(bytes);
+        let bytes_written = self.inner.write_pcm(tag, bytes);
         if bytes_written < 0 {
             return Err(SinkError::Closed);
         }
@@ -130,10 +130,6 @@ impl AudioSink for SinkAdapter {
 
     fn available(&self) -> usize {
         (self.inner.available_bytes() as usize) / 2
-    }
-
-    fn on_sentence_start(&mut self, tag: u64, sample_offset: u64) {
-        self.inner.on_sentence_start(tag, sample_offset);
     }
 
     fn on_drain_complete(&mut self) {
@@ -188,11 +184,11 @@ impl SopranoTts {
     }
 
     /// Feed text for synthesis. Non-blocking — queues internally.
-    /// `tag` is an opaque app-defined identifier echoed back via
-    /// `on_sentence_start` at the sample where this feed's audio begins. A feed
-    /// that synthesizes no audio fires no `on_sentence_start` and is reported
-    /// via `on_error` instead. Synthesis errors are delivered asynchronously
-    /// through `on_error`.
+    /// `tag` is an opaque app-defined identifier attached to every `write_pcm`
+    /// carrying this feed's audio, so the host can map played samples back to
+    /// the sentence. A feed that synthesizes no audio produces no `write_pcm`
+    /// for its tag and is reported via `on_error` instead. Synthesis errors are
+    /// delivered asynchronously through `on_error`.
     pub fn feed(&self, text: String, tag: u64) -> Result<(), FfiError> {
         self.inner.feed(&text, tag).map_err(FfiError::from)
     }

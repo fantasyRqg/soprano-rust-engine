@@ -30,7 +30,7 @@ struct SlowSink {
 }
 
 impl FfiAudioSink for SlowSink {
-    fn write_pcm(&self, pcm_data: Vec<u8>) -> i64 {
+    fn write_pcm(&self, _tag: u64, pcm_data: Vec<u8>) -> i64 {
         self.started.store(true, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(200));
         pcm_data.len() as i64
@@ -40,7 +40,6 @@ impl FfiAudioSink for SlowSink {
         0
     }
 
-    fn on_sentence_start(&self, _tag: u64, _sample_offset: u64) {}
     fn on_drain_complete(&self) {}
     fn on_error(&self, _tag: u64, _message: String) {}
 }
