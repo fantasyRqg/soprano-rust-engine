@@ -220,7 +220,7 @@ fn test_e2e_flush_then_drain_completes() {
     engine
         .feed(&"hello ".repeat(700), 0)
         .expect("feed should succeed");
-    engine.flush();
+    engine.clear();
 
     let (done_tx, done_rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -353,7 +353,7 @@ fn test_e2e_feed_after_flush_is_not_discarded() {
 
     // Barge-in: cancel the current utterance and immediately say something new.
     // The new feed is queued behind the Flush message; it must survive it.
-    engine.flush();
+    engine.clear();
     engine.feed("Enough of this.", 99).expect("feed 2 failed");
     engine.drain();
 
@@ -646,7 +646,7 @@ fn test_e2e_feed_is_tagged_across_flush() {
 
     // drain() blocks until the worker has processed the flush, so feed 2 is
     // synthesized fresh after it.
-    engine.flush();
+    engine.clear();
     engine.drain();
 
     engine.feed("Enough of this.", 2).expect("feed 2 failed");

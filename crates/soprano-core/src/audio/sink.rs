@@ -26,7 +26,7 @@ pub trait AudioSink: Send {
     /// A blocked `write` MUST eventually return (e.g. by returning
     /// `Err(SinkError::Closed)` when playback stops for good). Cancellation
     /// and engine shutdown are only checked between calls, so a `write` that
-    /// never returns hangs `flush` semantics and blocks `SopranoTTS`'s `Drop`
+    /// never returns hangs `clear` semantics and blocks `SopranoTTS`'s `Drop`
     /// (which joins the worker thread) forever.
     fn write(&mut self, tag: u64, samples: &[i16]) -> Result<usize, SinkError>;
 

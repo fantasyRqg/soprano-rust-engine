@@ -90,7 +90,7 @@ fn flush_interrupts_blocked_drain() {
 
     // Stop button: flush() must return promptly even while drain() is blocked.
     let t0 = Instant::now();
-    engine.flush();
+    engine.clear();
     let flush_elapsed = t0.elapsed();
     assert!(
         flush_elapsed < Duration::from_secs(2),

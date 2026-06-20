@@ -144,8 +144,8 @@ impl AudioSink for SinkAdapter {
 // ─── Main engine object ────────────────────────────────────────────────────
 
 // No lock around the engine: all core methods take &self and are thread-safe.
-// In particular, flush() must never wait on drain() — drain() blocks at
-// playback rate, and a Stop button calling flush() behind a lock would hang
+// In particular, clear() must never wait on drain() — drain() blocks at
+// playback rate, and a Stop button calling clear() behind a lock would hang
 // the UI until the utterance finished playing.
 #[derive(uniffi::Object)]
 pub struct SopranoTts {
@@ -196,8 +196,8 @@ impl SopranoTts {
     /// Request cancellation of current inference and discard sentences queued
     /// before this call. Feeds submitted afterwards are kept. Safe to call
     /// while another thread is blocked in `drain()`.
-    pub fn flush(&self) {
-        self.inner.flush();
+    pub fn clear(&self) {
+        self.inner.clear();
     }
 
     /// Block until all queued sentences finish writing to sink.

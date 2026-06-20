@@ -86,7 +86,7 @@ pub enum SopranoError {
 /// Internal message for the worker thread.
 enum WorkerMsg {
     Feed { text: String, tag: u64, epoch: u64 },
-    Flush,
+    Clear,
     Drain { done_tx: mpsc::Sender<()> },
     UpdateParams(SamplingParams),
     Shutdown,
@@ -97,9 +97,9 @@ pub struct SopranoTTS {
     worker_tx: mpsc::Sender<WorkerMsg>,
     worker_handle: Option<thread::JoinHandle<()>>,
     /// Monotonic stream generation. Each feed is stamped with the epoch at
-    /// submission time; `flush()` bumps it. The worker skips feeds from older
+    /// submission time; `clear()` bumps it. The worker skips feeds from older
     /// epochs and cancels in-flight synthesis when the epoch moves, so feeds
-    /// submitted *after* a flush are never discarded by it.
+    /// submitted *after* a clear are never discarded by it.
     epoch: Arc<AtomicU64>,
 }
 
@@ -190,17 +190,17 @@ impl SopranoTTS {
     }
 
     /// Request cancellation of current inference and discard sentences queued
-    /// before this call. Feeds submitted after `flush()` returns are kept.
+    /// before this call. Feeds submitted after `clear()` returns are kept.
     ///
     /// Cancellation is checked between ONNX calls and decoder writes. If a sink
     /// blocks inside `write()`, cancellation takes effect after that call returns.
-    pub fn flush(&self) {
+    pub fn clear(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        let _ = self.worker_tx.send(WorkerMsg::Flush);
+        let _ = self.worker_tx.send(WorkerMsg::Clear);
     }
 
     /// Block until all queued sentences finish writing to sink, or until a
-    /// pending flush has discarded the queue.
+    /// pending clear has discarded the queue.
     pub fn drain(&self) {
         let (done_tx, done_rx) = mpsc::channel();
         if self.worker_tx.send(WorkerMsg::Drain { done_tx }).is_ok() {
@@ -250,7 +250,7 @@ fn worker_loop(
                 tag,
                 epoch: feed_epoch,
             }) => {
-                // Stale feed: a flush happened after it was queued.
+                // Stale feed: a clear happened after it was queued.
                 if feed_epoch != epoch.load(Ordering::SeqCst) {
                     continue;
                 }
@@ -401,11 +401,11 @@ fn worker_loop(
                     continue;
                 }
             }
-            Ok(WorkerMsg::Flush) => {
+            Ok(WorkerMsg::Clear) => {
                 // Nothing to reset on the worker: stale feeds are skipped by the
                 // epoch check as they dequeue, in-flight synthesis cancels on the
                 // same check, and audio offsets are now the host's to track from
-                // the tagged `write` stream (it clears its own buffer on flush).
+                // the tagged `write` stream (it clears its own buffer on clear).
             }
             Ok(WorkerMsg::Drain { done_tx }) => {
                 let _ = done_tx.send(());
