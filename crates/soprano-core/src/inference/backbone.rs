@@ -13,16 +13,6 @@ use super::session::*;
 use crate::profile::profile_log;
 use crate::text::tokenizer::TOKEN_STOP;
 
-/// Result of a single backbone generation run.
-pub struct BackboneOutput {
-    /// Collected hidden states from generated tokens, shape (num_tokens, HIDDEN_DIM).
-    pub hidden_states: Vec<Vec<f32>>,
-    /// Generated token IDs (excluding prompt tokens).
-    pub generated_tokens: Vec<u32>,
-    /// Whether generation was stopped by hallucination detection.
-    pub hallucinated: bool,
-}
-
 /// Hallucination detection: track consecutive tokens with similar hidden states.
 struct HallucinationDetector {
     prev_hidden: Option<Vec<f32>>,
@@ -75,53 +65,6 @@ pub(crate) enum StreamOutcome {
     Aborted,
 }
 
-/// Run autoregressive generation on the backbone model.
-pub fn generate(
-    session: &mut Session,
-    input_ids: &[i64],
-    params: &SamplingParams,
-) -> Result<BackboneOutput, String> {
-    Ok(generate_cancellable(session, input_ids, params, || false)?
-        .expect("non-cancellable generation cannot be cancelled"))
-}
-
-/// Generate and collect all hidden states/tokens into a `BackboneOutput`.
-/// Returns `None` if cancelled. On hallucination the returned buffer includes
-/// the degenerate token (the caller discards it).
-pub(crate) fn generate_cancellable(
-    session: &mut Session,
-    input_ids: &[i64],
-    params: &SamplingParams,
-    should_cancel: impl Fn() -> bool,
-) -> Result<Option<BackboneOutput>, String> {
-    let mut hidden_states = Vec::new();
-    let mut generated_tokens = Vec::new();
-    let end = generate_core(
-        session,
-        input_ids,
-        params,
-        should_cancel,
-        |token, hidden| {
-            generated_tokens.push(token);
-            hidden_states.push(hidden.to_vec());
-            Ok(true)
-        },
-    )?;
-    Ok(match end {
-        GenEnd::Aborted => None,
-        GenEnd::Hallucinated => Some(BackboneOutput {
-            hidden_states,
-            generated_tokens,
-            hallucinated: true,
-        }),
-        GenEnd::Completed => Some(BackboneOutput {
-            hidden_states,
-            generated_tokens,
-            hallucinated: false,
-        }),
-    })
-}
-
 /// Generate and hand each token's hidden state to `on_hidden` as soon as it is
 /// produced, so a decoder can stream audio while generation continues.
 /// `on_hidden` returns `Ok(false)` to stop early (e.g. the sink closed).
@@ -154,7 +97,7 @@ pub(crate) fn generate_streaming_cancellable(
 /// its hidden state (after the EOS check, before hallucination detection — so a
 /// hallucination run's tokens are delivered but the EOS token is not). It
 /// returns `Ok(false)` to abort generation.
-fn generate_core(
+pub(crate) fn generate_core(
     session: &mut Session,
     input_ids: &[i64],
     params: &SamplingParams,

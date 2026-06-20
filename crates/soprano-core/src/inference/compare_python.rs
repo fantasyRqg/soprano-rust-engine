@@ -1,13 +1,18 @@
-//! Compare Rust engine output against Python ONNX reference.
-//! Run `cd soprano && uv run python -c "..."` first to generate /tmp/soprano_ref_*.npy
+//! Compare Rust engine output against the Python ONNX reference.
+//! Run `cd soprano && uv run python -c "..."` first to generate
+//! /tmp/soprano_ref_*.npy, then `cargo test -p soprano-core compare`.
+//!
+//! Drives the internal `generate_core` (collecting tokens + hidden states) and
+//! `run_decoder` (whole-buffer decode) primitives — the same primitives the
+//! streaming path is built on — so the comparison needs no public one-shot API.
 
-use soprano_core::inference::backbone;
-use soprano_core::inference::decoder;
-use soprano_core::inference::sampler::SamplingParams;
-use soprano_core::inference::session::load_session;
-use soprano_core::text::normalizer;
-use soprano_core::text::tokenizer::SopranoTokenizer;
-use soprano_core::ExecutionProvider;
+use crate::inference::backbone::{self, GenEnd};
+use crate::inference::decoder;
+use crate::inference::sampler::SamplingParams;
+use crate::inference::session::load_session;
+use crate::text::normalizer;
+use crate::text::tokenizer::SopranoTokenizer;
+use crate::ExecutionProvider;
 
 fn models_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models")
@@ -24,26 +29,25 @@ fn ref_data_available() -> bool {
     std::path::Path::new("/tmp/soprano_ref_tokens.npy").exists()
 }
 
-/// Load a 1D npy file as Vec<i64> (tokens are stored as int64).
-fn load_npy_i64(path: &str) -> Vec<i64> {
-    let bytes = std::fs::read(path).unwrap();
-    // Simple npy parser for 1D int64 arrays
-    // Skip header, find data
-    // Find the \n after the header dict
-    let mut pos = 0;
-    // npy format: magic(6) + version(2) + header_len(2/4) + header
+/// Skip the npy header and return the data offset.
+fn npy_data_offset(bytes: &[u8]) -> usize {
     if &bytes[..6] == b"\x93NUMPY" {
         let major = bytes[6];
-        let _minor = bytes[7];
         let header_len = if major == 1 {
             u16::from_le_bytes([bytes[8], bytes[9]]) as usize
         } else {
             u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize
         };
-        pos = if major == 1 { 10 } else { 12 };
-        pos += header_len;
+        (if major == 1 { 10 } else { 12 }) + header_len
+    } else {
+        0
     }
-    let data = &bytes[pos..];
+}
+
+/// Load a 1D npy file as Vec<i64> (tokens are stored as int64).
+fn load_npy_i64(path: &str) -> Vec<i64> {
+    let bytes = std::fs::read(path).unwrap();
+    let data = &bytes[npy_data_offset(&bytes)..];
     data.chunks(8)
         .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
         .collect()
@@ -51,18 +55,7 @@ fn load_npy_i64(path: &str) -> Vec<i64> {
 
 fn load_npy_f32(path: &str) -> Vec<f32> {
     let bytes = std::fs::read(path).unwrap();
-    let mut pos = 0;
-    if &bytes[..6] == b"\x93NUMPY" {
-        let major = bytes[6];
-        let header_len = if major == 1 {
-            u16::from_le_bytes([bytes[8], bytes[9]]) as usize
-        } else {
-            u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize
-        };
-        pos = if major == 1 { 10 } else { 12 };
-        pos += header_len;
-    }
-    let data = &bytes[pos..];
+    let data = &bytes[npy_data_offset(&bytes)..];
     data.chunks(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
         .collect()
@@ -78,35 +71,25 @@ fn test_compare_tokens_with_python() {
 
     let dir = models_dir();
 
-    // Step 1: Normalize text the same way Python does
-    // Python uses: prompt = f'[STOP][TEXT]{text}[START]'
-    // Our normalizer adds extra processing. Let's match Python exactly.
+    // Python does NOT run text normalization for the e2e test; it uses the raw
+    // prompt `[STOP][TEXT]{text}[START]`. Match that exactly.
     let text = "Hello world.";
     let normalized = normalizer::normalize(text);
     eprintln!("Rust normalized: {:?}", normalized);
-
-    // Python prompt for "Hello world." is "[STOP][TEXT]Hello world.[START]"
-    // Note: Python does NOT run text normalization for the e2e test!
-    // It uses raw text directly: prompt = f'[STOP][TEXT]{text}[START]'
     let python_prompt = "[STOP][TEXT]Hello world.[START]";
     eprintln!("Python prompt:   {:?}", python_prompt);
 
-    // Step 2: Tokenize both
     let tokenizer = SopranoTokenizer::from_file(dir.join("tokenizer.json")).unwrap();
     let rust_ids = tokenizer.encode(&normalized).unwrap();
     let python_ids = tokenizer.encode(python_prompt).unwrap();
-
     eprintln!("Rust token IDs:   {:?}", rust_ids);
     eprintln!("Python token IDs: {:?}", python_ids);
-
-    // Check if normalization changes the tokens
     if rust_ids != python_ids {
         eprintln!("WARNING: Rust normalization produces different tokens than Python raw text!");
-        eprintln!("  Rust normalized text: {:?}", normalized);
-        eprintln!("  Python raw prompt:    {:?}", python_prompt);
     }
 
-    // Step 3: Run backbone with the SAME input as Python (bypass normalization)
+    // Run the backbone with the SAME input as Python (bypassing normalization),
+    // collecting tokens and hidden states straight off the core loop.
     let input_ids: Vec<i64> = python_ids.iter().map(|&id| id as i64).collect();
     eprintln!("Running backbone with Python-matching input_ids...");
 
@@ -127,17 +110,30 @@ fn test_compare_tokens_with_python() {
         repetition_penalty: 1.2,
     };
 
-    let output = backbone::generate(&mut backbone_session, &input_ids, &params).unwrap();
+    let mut generated_tokens: Vec<u32> = Vec::new();
+    let mut hidden_states: Vec<Vec<f32>> = Vec::new();
+    let end = backbone::generate_core(
+        &mut backbone_session,
+        &input_ids,
+        &params,
+        || false,
+        |token, hidden| {
+            generated_tokens.push(token);
+            hidden_states.push(hidden.to_vec());
+            Ok(true)
+        },
+    )
+    .unwrap();
+    let hallucinated = matches!(end, GenEnd::Hallucinated);
 
     eprintln!(
         "Rust generated {} tokens: {:?}",
-        output.generated_tokens.len(),
-        output.generated_tokens
+        generated_tokens.len(),
+        generated_tokens
     );
-    eprintln!("Rust hidden states: {} vectors", output.hidden_states.len());
-    eprintln!("Hallucinated: {}", output.hallucinated);
+    eprintln!("Rust hidden states: {} vectors", hidden_states.len());
+    eprintln!("Hallucinated: {}", hallucinated);
 
-    // Load Python reference tokens
     let ref_tokens = load_npy_i64("/tmp/soprano_ref_tokens.npy");
     let ref_tokens_u32: Vec<u32> = ref_tokens.iter().map(|&t| t as u32).collect();
     eprintln!(
@@ -146,39 +142,29 @@ fn test_compare_tokens_with_python() {
         ref_tokens_u32
     );
 
-    // Compare tokens
-    let match_len = output.generated_tokens.len().min(ref_tokens_u32.len());
-    let mut first_mismatch = None;
-    for (i, (rust_token, python_token)) in output
-        .generated_tokens
+    let match_len = generated_tokens.len().min(ref_tokens_u32.len());
+    let first_mismatch = generated_tokens
         .iter()
         .zip(&ref_tokens_u32)
-        .enumerate()
         .take(match_len)
-    {
-        if rust_token != python_token {
-            first_mismatch = Some(i);
-            break;
-        }
-    }
-
+        .position(|(r, p)| r != p);
     if let Some(pos) = first_mismatch {
         eprintln!(
             "MISMATCH at token {}: rust={}, python={}",
-            pos, output.generated_tokens[pos], ref_tokens_u32[pos]
+            pos, generated_tokens[pos], ref_tokens_u32[pos]
         );
-    } else if output.generated_tokens.len() != ref_tokens_u32.len() {
+    } else if generated_tokens.len() != ref_tokens_u32.len() {
         eprintln!(
             "Token count differs: rust={}, python={}",
-            output.generated_tokens.len(),
+            generated_tokens.len(),
             ref_tokens_u32.len()
         );
     } else {
         eprintln!("ALL TOKENS MATCH!");
     }
 
-    // Step 4: Run decoder and compare audio
-    if !output.hidden_states.is_empty() {
+    // Run the decoder over the whole hidden buffer and compare audio (SNR).
+    if !hidden_states.is_empty() {
         let mut decoder_session = load_session(
             if dir.join("soprano_decoder_f16.onnx").exists() {
                 dir.join("soprano_decoder_f16.onnx")
@@ -189,14 +175,13 @@ fn test_compare_tokens_with_python() {
         )
         .unwrap();
 
-        let audio = decoder::decode_all(&mut decoder_session, &output.hidden_states).unwrap();
+        let audio = decoder::run_decoder(&mut decoder_session, &hidden_states).unwrap();
         eprintln!(
             "Rust audio: {} samples ({:.2}s)",
             audio.len(),
             audio.len() as f64 / 32000.0
         );
 
-        // Load Python reference audio
         let ref_audio = load_npy_f32("/tmp/soprano_ref_audio.npy");
         eprintln!(
             "Python ref audio: {} samples ({:.2}s)",
@@ -204,7 +189,6 @@ fn test_compare_tokens_with_python() {
             ref_audio.len() as f64 / 32000.0
         );
 
-        // Compute SNR
         let min_len = audio.len().min(ref_audio.len());
         if min_len > 0 {
             let signal_power: f64 = ref_audio[..min_len]
@@ -236,11 +220,10 @@ fn test_compare_tokens_with_python() {
         }
     }
 
-    // Check that the first N tokens match (exact match expected for greedy decoding).
-    // Small divergence at the end is acceptable due to f16 floating point differences
-    // in ONNX Runtime between Python and Rust bindings.
-    let min_len = output.generated_tokens.len().min(ref_tokens_u32.len());
-    let matching = output.generated_tokens[..min_len]
+    // First N tokens must match (exact for greedy decoding). Small end-divergence
+    // is acceptable due to f16 float differences between Python and Rust ORT.
+    let min_len = generated_tokens.len().min(ref_tokens_u32.len());
+    let matching = generated_tokens[..min_len]
         .iter()
         .zip(&ref_tokens_u32[..min_len])
         .take_while(|(a, b)| a == b)

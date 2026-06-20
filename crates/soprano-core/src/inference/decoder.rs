@@ -49,7 +49,10 @@ fn write_f32_pcm(
 }
 
 /// Run the decoder on hidden states and return PCM f32 audio.
-fn run_decoder(session: &mut Session, hidden_states: &[Vec<f32>]) -> Result<Vec<f32>, String> {
+pub(crate) fn run_decoder(
+    session: &mut Session,
+    hidden_states: &[Vec<f32>],
+) -> Result<Vec<f32>, String> {
     if hidden_states.is_empty() {
         return Ok(Vec::new());
     }
@@ -88,46 +91,6 @@ fn run_decoder(session: &mut Session, hidden_states: &[Vec<f32>]) -> Result<Vec<
         .map_err(|e| format!("failed to extract audio: {}", e))?;
 
     Ok(audio_data.to_vec())
-}
-
-/// Run the decoder on all hidden states at once (non-streaming).
-pub fn decode_all(session: &mut Session, hidden_states: &[Vec<f32>]) -> Result<Vec<f32>, String> {
-    run_decoder(session, hidden_states)
-}
-
-/// Run the decoder in streaming mode with a sliding window.
-/// Writes PCM i16 chunks to the provided AudioSink as they become available.
-pub fn decode_streaming(
-    session: &mut Session,
-    hidden_states: &[Vec<f32>],
-    sink: &mut dyn AudioSink,
-) -> Result<usize, String> {
-    Ok(
-        decode_streaming_cancellable(session, hidden_states, sink, || false)?
-            .expect("non-cancellable decoding cannot be cancelled"),
-    )
-}
-
-/// Decode a complete hidden-state buffer in one streaming pass. Equivalent to
-/// pushing every token through [`StreamingDecode`] with no holdback and then
-/// finishing — kept as the reference entry point exercised by the lossless
-/// test. Returns `None` if cancelled mid-stream.
-pub(crate) fn decode_streaming_cancellable(
-    session: &mut Session,
-    hidden_states: &[Vec<f32>],
-    sink: &mut dyn AudioSink,
-    should_cancel: impl Fn() -> bool,
-) -> Result<Option<usize>, String> {
-    let mut stream = StreamingDecode::new(session, 0, 0);
-    for hidden in hidden_states {
-        if !stream.push(hidden, sink, &should_cancel)? {
-            return Ok(None);
-        }
-    }
-    if !stream.finish(sink, &should_cancel)? {
-        return Ok(None);
-    }
-    Ok(Some(stream.total_samples_written()))
 }
 
 /// Incremental sliding-window decoder. Hidden states are pushed one token at a
@@ -262,5 +225,132 @@ impl<'s> StreamingDecode<'s> {
         }
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The sliding-window streaming decoder must be lossless: feeding hidden
+    //! states through `StreamingDecode` must reproduce the audio produced by
+    //! decoding the whole sequence at once with `run_decoder` (the oracle).
+    use super::*;
+    use crate::audio::convert::f32_to_i16;
+    use crate::inference::session::{load_session, HIDDEN_DIM, STREAM_HOLDBACK_FRAMES};
+    use crate::ExecutionProvider;
+
+    struct Collector(Vec<i16>);
+    impl AudioSink for Collector {
+        fn write(&mut self, _tag: u64, samples: &[i16]) -> Result<usize, SinkError> {
+            self.0.extend_from_slice(samples);
+            Ok(samples.len())
+        }
+        fn available(&self) -> usize {
+            usize::MAX
+        }
+        fn on_drain_complete(&mut self) {}
+        fn on_error(&mut self, _: u64, _: String) {}
+    }
+
+    fn decoder_path() -> Option<std::path::PathBuf> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models");
+        ["soprano_decoder_f16.onnx", "soprano_decoder.onnx"]
+            .iter()
+            .map(|n| dir.join(n))
+            .find(|p| p.exists())
+    }
+
+    // Deterministic synthetic hidden states (no backbone needed).
+    fn synth(n: usize) -> Vec<Vec<f32>> {
+        (0..n)
+            .map(|i| {
+                (0..HIDDEN_DIM)
+                    .map(|d| (((i * 31 + d * 7) % 97) as f32 / 97.0) - 0.5)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn whole_decode(session: &mut Session, hidden: &[Vec<f32>]) -> Vec<i16> {
+        run_decoder(session, hidden)
+            .expect("run_decoder")
+            .iter()
+            .map(|&s| f32_to_i16(s))
+            .collect()
+    }
+
+    fn assert_lossless(streamed: &[i16], whole: &[i16], label: &str) {
+        assert_eq!(
+            streamed.len(),
+            whole.len(),
+            "{label} length {} != whole-decode length {}",
+            streamed.len(),
+            whole.len()
+        );
+        let max_diff = streamed
+            .iter()
+            .zip(whole)
+            .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_diff <= 1,
+            "{label} audio diverges from whole decode: max abs i16 diff = {max_diff}"
+        );
+    }
+
+    #[test]
+    fn streaming_decode_matches_whole_decode() {
+        let Some(path) = decoder_path() else {
+            eprintln!("Skipping: decoder model not found");
+            return;
+        };
+        let mut session = load_session(&path, &ExecutionProvider::Cpu).expect("load decoder");
+
+        // Span several windows (CHUNK_SIZE=8) including a non-aligned tail.
+        let hidden = synth(45);
+        let whole = whole_decode(&mut session, &hidden);
+
+        // No holdback: stream the whole pre-computed buffer through the decoder.
+        let mut sink = Collector(Vec::new());
+        {
+            let mut stream = StreamingDecode::new(&mut session, 0, 0);
+            for h in &hidden {
+                assert!(stream.push(h, &mut sink, &|| false).expect("push"));
+            }
+            assert!(stream.finish(&mut sink, &|| false).expect("finish"));
+        }
+        assert_lossless(&sink.0, &whole, "streamed");
+    }
+
+    // Interleaved decoding (one hidden state pushed at a time, with a holdback
+    // margin so hallucination runs never reach the sink) must, on a clean finish,
+    // drain every buffered frame and reproduce the whole-decode audio exactly.
+    #[test]
+    fn interleaved_decode_with_holdback_matches_whole_decode() {
+        let Some(path) = decoder_path() else {
+            eprintln!("Skipping: decoder model not found");
+            return;
+        };
+        let mut session = load_session(&path, &ExecutionProvider::Cpu).expect("load decoder");
+
+        // Enough tokens to span the holdback margin plus several emitted windows.
+        let hidden = synth(STREAM_HOLDBACK_FRAMES + 40);
+        let whole = whole_decode(&mut session, &hidden);
+
+        let mut sink = Collector(Vec::new());
+        {
+            let mut stream = StreamingDecode::new(&mut session, STREAM_HOLDBACK_FRAMES, 0);
+            for h in &hidden {
+                assert!(
+                    stream.push(h, &mut sink, &|| false).expect("push"),
+                    "push should not signal stop without cancellation"
+                );
+            }
+            assert!(
+                stream.finish(&mut sink, &|| false).expect("finish"),
+                "finish should not signal stop without cancellation"
+            );
+        }
+        assert_lossless(&sink.0, &whole, "interleaved");
     }
 }
