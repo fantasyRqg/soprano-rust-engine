@@ -235,6 +235,41 @@ fn test_e2e_flush_then_drain_completes() {
 }
 
 #[test]
+fn test_e2e_clear_is_synchronous_and_reusable() {
+    if !models_available() {
+        return;
+    }
+
+    let sink = CollectorSink::new(1_000_000);
+    let config = SopranoConfig {
+        model_path: models_dir().to_string_lossy().to_string(),
+        ..Default::default()
+    };
+
+    let engine = Arc::new(SopranoTTS::new(config, Box::new(sink)).expect("failed to create engine"));
+    engine
+        .feed(&"hello ".repeat(700), 0)
+        .expect("feed should succeed");
+
+    // clear() blocks until cancellation completes; run it on another thread and
+    // guard against a hang so a deadlock regression fails instead of stalling.
+    let (done_tx, done_rx) = mpsc::channel();
+    let clearer = engine.clone();
+    std::thread::spawn(move || {
+        clearer.clear();
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "clear() did not return — synchronous clear must not block forever"
+    );
+
+    // On return the engine is idle and still usable.
+    engine.feed("Hello world.", 1).expect("feed after clear");
+    engine.drain();
+}
+
+#[test]
 fn test_e2e_estimate() {
     if !models_available() {
         return;

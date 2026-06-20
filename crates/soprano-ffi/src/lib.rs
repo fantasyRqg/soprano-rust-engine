@@ -144,9 +144,9 @@ impl AudioSink for SinkAdapter {
 // ─── Main engine object ────────────────────────────────────────────────────
 
 // No lock around the engine: all core methods take &self and are thread-safe.
-// In particular, clear() must never wait on drain() — drain() blocks at
-// playback rate, and a Stop button calling clear() behind a lock would hang
-// the UI until the utterance finished playing.
+// clear() and drain() both block (until the worker reaches their request), so
+// wrapping the engine in a lock would let one blocked call stall the others —
+// keep them lock-free and let the worker serialize them.
 #[derive(uniffi::Object)]
 pub struct SopranoTts {
     inner: soprano_core::SopranoTTS,
@@ -193,9 +193,13 @@ impl SopranoTts {
         self.inner.feed(&text, tag).map_err(FfiError::from)
     }
 
-    /// Request cancellation of current inference and discard sentences queued
-    /// before this call. Feeds submitted afterwards are kept. Safe to call
-    /// while another thread is blocked in `drain()`.
+    /// Cancel current inference, discard sentences queued before this call, and
+    /// block until the worker has finished — on return the engine is idle and no
+    /// further audio for the cleared work will arrive, so the host can reset its
+    /// buffer and feed new data cleanly. Feeds submitted afterwards are kept.
+    ///
+    /// Blocks, so call it off the UI thread, and never from inside a sink
+    /// callback (which runs on the worker thread) — that would deadlock.
     pub fn clear(&self) {
         self.inner.clear();
     }

@@ -86,7 +86,7 @@ pub enum SopranoError {
 /// Internal message for the worker thread.
 enum WorkerMsg {
     Feed { text: String, tag: u64, epoch: u64 },
-    Clear,
+    Clear { done_tx: mpsc::Sender<()> },
     Drain { done_tx: mpsc::Sender<()> },
     UpdateParams(SamplingParams),
     Shutdown,
@@ -189,14 +189,26 @@ impl SopranoTTS {
             .map_err(|_| SopranoError::InferenceError("worker thread died".to_string()))
     }
 
-    /// Request cancellation of current inference and discard sentences queued
-    /// before this call. Feeds submitted after `clear()` returns are kept.
+    /// Cancel current inference, discard sentences queued before this call, and
+    /// block until the worker has finished doing so. On return, no further audio
+    /// for the cleared work will be written and the engine is idle, so the host
+    /// can reset its own output buffer and feed new data on a clean boundary.
+    /// Feeds submitted after `clear()` returns are kept.
     ///
-    /// Cancellation is checked between ONNX calls and decoder writes. If a sink
-    /// blocks inside `write()`, cancellation takes effect after that call returns.
+    /// The epoch bump cancels in-flight synthesis at the next check (between ONNX
+    /// calls and decoder writes); `clear()` then waits for the worker to drain up
+    /// to this request. Two consequences for the caller:
+    /// - It blocks, so call it off the UI thread.
+    /// - It must NOT be called from inside a sink callback (`write`/`on_error`/
+    ///   `on_drain_complete`), which run on the worker thread — that would
+    ///   deadlock. A `write` blocked on backpressure also delays the return, so
+    ///   such a `write` must return promptly once playback is stopping.
     pub fn clear(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
-        let _ = self.worker_tx.send(WorkerMsg::Clear);
+        let (done_tx, done_rx) = mpsc::channel();
+        if self.worker_tx.send(WorkerMsg::Clear { done_tx }).is_ok() {
+            let _ = done_rx.recv();
+        }
     }
 
     /// Block until all queued sentences finish writing to sink, or until a
@@ -262,11 +274,14 @@ fn worker_loop(
                     &epoch,
                 );
             }
-            Ok(WorkerMsg::Clear) => {
+            Ok(WorkerMsg::Clear { done_tx }) => {
                 // Nothing to reset on the worker: stale feeds are skipped by the
                 // epoch check as they dequeue, in-flight synthesis cancels on the
                 // same check, and audio offsets are now the host's to track from
                 // the tagged `write` stream (it clears its own buffer on clear).
+                // Reaching this message means all of that is done; acking it
+                // unblocks the synchronous `clear()` on a clean boundary.
+                let _ = done_tx.send(());
             }
             Ok(WorkerMsg::Drain { done_tx }) => {
                 let _ = done_tx.send(());
