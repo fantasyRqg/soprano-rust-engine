@@ -250,156 +250,17 @@ fn worker_loop(
                 tag,
                 epoch: feed_epoch,
             }) => {
-                // Stale feed: a clear happened after it was queued.
-                if feed_epoch != epoch.load(Ordering::SeqCst) {
-                    continue;
-                }
-                let is_cancelled = || feed_epoch != epoch.load(Ordering::SeqCst);
-                let t_feed = Instant::now();
-
-                // Normalize text
-                let normalized = normalizer::normalize(&text);
-                let chunks = chunker::chunk_normalized(&normalized);
-                profile_log!(
-                    "feed tag={}: normalize+chunk {}ms, {} chunks",
+                process_feed(
+                    &text,
                     tag,
-                    t_feed.elapsed().as_millis(),
-                    chunks.len()
+                    feed_epoch,
+                    tokenizer,
+                    &mut *backbone,
+                    &mut *decoder,
+                    &mut *sink,
+                    &params,
+                    &epoch,
                 );
-
-                if chunks.is_empty() {
-                    sink.on_error(tag, "normalized input was empty".to_string());
-                    continue;
-                }
-
-                // The feed's audio carries its `tag` on every sink write (see
-                // `AudioSink::write`). A feed that synthesizes nothing — e.g. a
-                // chunk the backbone collapses into a hallucination run, whose
-                // held-back frames are dropped — therefore writes no tagged
-                // audio at all and is reported via `on_error` instead.
-                let mut cancelled = false;
-                for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
-                    if is_cancelled() {
-                        cancelled = true;
-                        break;
-                    }
-                    profile_log!(
-                        "chunk {} start at +{}ms ({} chars)",
-                        chunk_idx,
-                        t_feed.elapsed().as_millis(),
-                        chunk.len()
-                    );
-
-                    // Tokenize. Any chunk error aborts the rest of the feed:
-                    // synthesizing later chunks would play audio with an
-                    // unannounced gap in the middle of the utterance.
-                    let token_ids = match tokenizer.encode(&chunk) {
-                        Ok(ids) => ids,
-                        Err(e) => {
-                            sink.on_error(tag, format!("tokenization error: {}", e));
-                            break;
-                        }
-                    };
-
-                    // Check length limit
-                    if token_ids.len() > MAX_TOKENS {
-                        sink.on_error(
-                            tag,
-                            format!(
-                                "input too long: {} tokens exceeds max {}",
-                                token_ids.len(),
-                                MAX_TOKENS
-                            ),
-                        );
-                        break;
-                    }
-
-                    // Convert to i64 for ONNX
-                    let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
-
-                    // Interleave generation and decoding: each hidden state is
-                    // pushed into the streaming decoder as the backbone produces
-                    // it, so audio starts after roughly the holdback margin
-                    // instead of after the whole chunk is generated. The decoder
-                    // holds back STREAM_HOLDBACK_FRAMES so a hallucination run
-                    // (detected only after the fact) never reaches the sink.
-                    let mut stream =
-                        decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES, tag);
-                    let mut first_audio_logged = false;
-                    let outcome = backbone::generate_streaming_cancellable(
-                        &mut *backbone,
-                        &input_ids,
-                        &params,
-                        is_cancelled,
-                        |hidden| {
-                            let cont = stream.push(hidden, &mut *sink, &is_cancelled)?;
-                            if !first_audio_logged && stream.total_samples_written() > 0 {
-                                profile_log!(
-                                    "chunk {} first audio at +{}ms",
-                                    chunk_idx,
-                                    t_feed.elapsed().as_millis()
-                                );
-                                first_audio_logged = true;
-                            }
-                            Ok(cont)
-                        },
-                    );
-
-                    match outcome {
-                        Ok(backbone::StreamOutcome::Completed { generated }) => {
-                            profile_log!(
-                                "chunk {} backbone done at +{}ms ({} tokens), draining decoder",
-                                chunk_idx,
-                                t_feed.elapsed().as_millis(),
-                                generated
-                            );
-                            // Clean end: drain the held-back margin.
-                            match stream.finish(&mut *sink, &is_cancelled) {
-                                Ok(true) => {
-                                    profile_log!(
-                                        "chunk {} decode done at +{}ms ({} samples)",
-                                        chunk_idx,
-                                        t_feed.elapsed().as_millis(),
-                                        stream.total_samples_written()
-                                    );
-                                }
-                                Ok(false) => {
-                                    cancelled = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    sink.on_error(tag, format!("decoder error: {}", e));
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(backbone::StreamOutcome::Hallucinated { generated }) => {
-                            profile_log!(
-                                "chunk {} hallucinated at +{}ms ({} tokens); dropping held-back tail",
-                                chunk_idx,
-                                t_feed.elapsed().as_millis(),
-                                generated
-                            );
-                            // The degenerate run is still buffered behind the
-                            // holdback margin; by NOT calling finish() those
-                            // frames are dropped and never reach the sink.
-                            sink.on_error(tag, "hallucination detected".to_string());
-                            break;
-                        }
-                        Ok(backbone::StreamOutcome::Aborted) => {
-                            cancelled = true;
-                            break;
-                        }
-                        Err(e) => {
-                            sink.on_error(tag, format!("backbone error: {}", e));
-                            break;
-                        }
-                    }
-                }
-
-                if cancelled {
-                    continue;
-                }
             }
             Ok(WorkerMsg::Clear) => {
                 // Nothing to reset on the worker: stale feeds are skipped by the
@@ -415,6 +276,161 @@ fn worker_loop(
                 params = new_params;
             }
             Ok(WorkerMsg::Shutdown) | Err(_) => {
+                return;
+            }
+        }
+    }
+}
+
+/// Synthesize one feed: normalize, chunk, and stream each chunk's audio to the
+/// sink. Returns early when the feed is stale, empty, errors, or is cancelled by
+/// a clear — in every case there is nothing left for the worker to do but pick
+/// up the next message.
+#[allow(clippy::too_many_arguments)]
+fn process_feed(
+    text: &str,
+    tag: u64,
+    feed_epoch: u64,
+    tokenizer: &SopranoTokenizer,
+    backbone: &mut Session,
+    decoder: &mut Session,
+    sink: &mut dyn AudioSink,
+    params: &SamplingParams,
+    epoch: &AtomicU64,
+) {
+    // Stale feed: a clear happened after it was queued.
+    if feed_epoch != epoch.load(Ordering::SeqCst) {
+        return;
+    }
+    let is_cancelled = || feed_epoch != epoch.load(Ordering::SeqCst);
+    let t_feed = Instant::now();
+
+    // Normalize text
+    let normalized = normalizer::normalize(text);
+    let chunks = chunker::chunk_normalized(&normalized);
+    profile_log!(
+        "feed tag={}: normalize+chunk {}ms, {} chunks",
+        tag,
+        t_feed.elapsed().as_millis(),
+        chunks.len()
+    );
+
+    if chunks.is_empty() {
+        sink.on_error(tag, "normalized input was empty".to_string());
+        return;
+    }
+
+    // The feed's audio carries its `tag` on every sink write (see
+    // `AudioSink::write`). A feed that synthesizes nothing — e.g. a chunk the
+    // backbone collapses into a hallucination run, whose held-back frames are
+    // dropped — therefore writes no tagged audio at all and is reported via
+    // `on_error` instead.
+    for (chunk_idx, chunk) in chunks.into_iter().enumerate() {
+        if is_cancelled() {
+            return;
+        }
+        profile_log!(
+            "chunk {} start at +{}ms ({} chars)",
+            chunk_idx,
+            t_feed.elapsed().as_millis(),
+            chunk.len()
+        );
+
+        // Tokenize. Any chunk error aborts the rest of the feed: synthesizing
+        // later chunks would play audio with an unannounced gap in the middle of
+        // the utterance.
+        let token_ids = match tokenizer.encode(&chunk) {
+            Ok(ids) => ids,
+            Err(e) => {
+                sink.on_error(tag, format!("tokenization error: {}", e));
+                return;
+            }
+        };
+
+        // Check length limit
+        if token_ids.len() > MAX_TOKENS {
+            sink.on_error(
+                tag,
+                format!(
+                    "input too long: {} tokens exceeds max {}",
+                    token_ids.len(),
+                    MAX_TOKENS
+                ),
+            );
+            return;
+        }
+
+        // Convert to i64 for ONNX
+        let input_ids: Vec<i64> = token_ids.iter().map(|&id| id as i64).collect();
+
+        // Interleave generation and decoding: each hidden state is pushed into
+        // the streaming decoder as the backbone produces it, so audio starts
+        // after roughly the holdback margin instead of after the whole chunk is
+        // generated. The decoder holds back STREAM_HOLDBACK_FRAMES so a
+        // hallucination run (detected only after the fact) never reaches the
+        // sink.
+        let mut stream = decoder::StreamingDecode::new(&mut *decoder, STREAM_HOLDBACK_FRAMES, tag);
+        let mut first_audio_logged = false;
+        let outcome = backbone::generate_streaming_cancellable(
+            &mut *backbone,
+            &input_ids,
+            params,
+            is_cancelled,
+            |hidden| {
+                let cont = stream.push(hidden, sink, &is_cancelled)?;
+                if !first_audio_logged && stream.total_samples_written() > 0 {
+                    profile_log!(
+                        "chunk {} first audio at +{}ms",
+                        chunk_idx,
+                        t_feed.elapsed().as_millis()
+                    );
+                    first_audio_logged = true;
+                }
+                Ok(cont)
+            },
+        );
+
+        match outcome {
+            Ok(backbone::StreamOutcome::Completed { generated }) => {
+                profile_log!(
+                    "chunk {} backbone done at +{}ms ({} tokens), draining decoder",
+                    chunk_idx,
+                    t_feed.elapsed().as_millis(),
+                    generated
+                );
+                // Clean end: drain the held-back margin.
+                match stream.finish(sink, &is_cancelled) {
+                    Ok(true) => {
+                        profile_log!(
+                            "chunk {} decode done at +{}ms ({} samples)",
+                            chunk_idx,
+                            t_feed.elapsed().as_millis(),
+                            stream.total_samples_written()
+                        );
+                    }
+                    Ok(false) => return,
+                    Err(e) => {
+                        sink.on_error(tag, format!("decoder error: {}", e));
+                        return;
+                    }
+                }
+            }
+            Ok(backbone::StreamOutcome::Hallucinated { generated }) => {
+                profile_log!(
+                    "chunk {} hallucinated at +{}ms ({} tokens); dropping held-back tail",
+                    chunk_idx,
+                    t_feed.elapsed().as_millis(),
+                    generated
+                );
+                // The degenerate run is still buffered behind the holdback
+                // margin; by NOT calling finish() those frames are dropped and
+                // never reach the sink.
+                sink.on_error(tag, "hallucination detected".to_string());
+                return;
+            }
+            Ok(backbone::StreamOutcome::Aborted) => return,
+            Err(e) => {
+                sink.on_error(tag, format!("backbone error: {}", e));
                 return;
             }
         }
