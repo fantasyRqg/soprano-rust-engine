@@ -248,6 +248,11 @@ static DIVIDE_RE: LazyLock<Regex> = lazy_regex!(r"(\d\s?/\s?\d)");
 static ADD_RE: LazyLock<Regex> = lazy_regex!(r"(\d\s?\+\s?\d)");
 static SUBTRACT_RE: LazyLock<Regex> = lazy_regex!(r"(\d?\s?-\s?\d)");
 static FRACTION_RE: LazyLock<Regex> = lazy_regex!(r"(\d+(?:/\d+)+)");
+// Extensions beyond the Python normalizer: decades ("1980s", "'80s") and
+// unspaced numeric ranges ("9-10", "10%-12%"). Spaced dashes ("4 - 5") still
+// fall through to SUBTRACT_RE and read as "minus".
+static DECADE_RE: LazyLock<Regex> = lazy_regex!(r"\b(\d*0)s\b");
+static RANGE_RE: LazyLock<Regex> = lazy_regex!(r"(\d%?)-([$£]?\d)");
 static ORDINAL_RE: LazyLock<Regex> = lazy_regex!(r"\d+(st|nd|rd|th)");
 static NUMBER_RE: LazyLock<Regex> = lazy_regex!(r"\d+");
 
@@ -510,6 +515,19 @@ fn normalize_numbers(text: &str) -> String {
         })
         .to_string();
 
+    // Decades: "1980s" → "nineteen eighties", "'80s" → "'eighties"
+    text = DECADE_RE
+        .replace_all(&text, |caps: &regex::Captures| {
+            let n: i64 = caps.get(1).unwrap().as_str().parse().unwrap_or(0);
+            let words = expand_number(n);
+            if let Some(stem) = words.strip_suffix('y') {
+                format!("{stem}ies")
+            } else {
+                format!("{words}s")
+            }
+        })
+        .to_string();
+
     // Remove commas from numbers
     text = COMMA_NUMBER_RE
         .replace_all(&text, |caps: &regex::Captures| {
@@ -616,6 +634,12 @@ fn normalize_numbers(text: &str) -> String {
             }
         })
         .to_string();
+
+    // Ranges: "9-10" → "9 to 10", "10%-12%" → "10% to 12%", "$5-$10" → "$5 to $10"
+    // Run twice so chains like "9-10-11" resolve fully (matches can't overlap).
+    for _ in 0..2 {
+        text = RANGE_RE.replace_all(&text, "$1 to $2").to_string();
+    }
 
     // Pounds
     text = POUNDS_RE.replace_all(&text, "$1 pounds").to_string();
@@ -1102,6 +1126,25 @@ mod tests {
             "misess j h riddell."
         );
         assert_eq!(clean_text("J. R. R. Tolkien"), "j r r tolkien.");
+    }
+
+    #[test]
+    fn test_decades() {
+        assert_eq!(clean_text("the 1980s"), "the nineteen eighties.");
+        assert_eq!(clean_text("the '80s"), "the 'eighties.");
+        assert_eq!(clean_text("the 1900s"), "the nineteen hundreds.");
+        assert_eq!(clean_text("the 2000s"), "the two thousands.");
+    }
+
+    #[test]
+    fn test_number_ranges() {
+        assert_eq!(clean_text("9-10"), "nine to ten.");
+        assert_eq!(clean_text("10%-12%"), "ten percent to twelve percent.");
+        assert_eq!(clean_text("10-12%"), "ten to twelve percent.");
+        assert_eq!(clean_text("$5-$10"), "five dollars to ten dollars.");
+        assert_eq!(clean_text("1.5-2.7"), "one point five to two point seven.");
+        // Spaced dashes still read as subtraction
+        assert_eq!(clean_text("4 - 5"), "four minus five.");
     }
 
     #[test]
